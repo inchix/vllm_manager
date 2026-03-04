@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vLLM Admin</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f1117; color: #e0e0e0; padding: 20px; }
+  h1 { font-size: 1.5rem; margin-bottom: 20px; color: #fff; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 1200px; margin: 0 auto; }
+  .card { background: #1a1d27; border: 1px solid #2a2d37; border-radius: 8px; padding: 20px; }
+  .card h2 { font-size: 1.1rem; margin-bottom: 12px; color: #a0a8c0; }
+  .full-width { grid-column: 1 / -1; }
+
+  /* Warning banner */
+  .warning { background: #3b2e00; border: 1px solid #ffb300; color: #ffd54f; padding: 10px 14px; border-radius: 6px; margin-bottom: 12px; display: none; font-size: 0.9rem; }
+
+  /* GPU checkboxes */
+  .gpu-list { display: flex; flex-direction: column; gap: 8px; }
+  .gpu-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: #22252f; border-radius: 6px; cursor: pointer; }
+  .gpu-item:hover { background: #2a2d3a; }
+  .gpu-item.in-use { opacity: 0.5; cursor: not-allowed; }
+  .gpu-item input { accent-color: #6c8cff; }
+  .gpu-name { font-weight: 500; }
+  .gpu-mem { color: #888; font-size: 0.85rem; margin-left: auto; }
+  .gpu-cc { color: #666; font-size: 0.8rem; }
+  .gpu-used { color: #ffb300; font-size: 0.75rem; }
+
+  /* Form controls */
+  label { display: block; font-size: 0.85rem; color: #888; margin-bottom: 4px; margin-top: 12px; }
+  select, input[type="number"] { width: 100%; padding: 8px; background: #22252f; border: 1px solid #333; color: #e0e0e0; border-radius: 4px; font-size: 0.9rem; }
+  select:first-of-type, label:first-of-type { margin-top: 0; }
+
+  .slider-row { display: flex; align-items: center; gap: 10px; }
+  .slider-row input[type="range"] { flex: 1; accent-color: #6c8cff; }
+  .slider-val { font-size: 0.9rem; min-width: 40px; }
+
+  /* Download */
+  input[type="text"] { width: 100%; padding: 8px; background: #22252f; border: 1px solid #333; color: #e0e0e0; border-radius: 4px; font-size: 0.9rem; }
+  .dl-status { font-size: 0.85rem; margin-top: 8px; min-height: 1.2em; }
+  .dl-status.downloading { color: #ffb300; }
+  .dl-status.complete { color: #4caf50; }
+  .dl-status.error { color: #f44336; }
+  .btn-download { background: #1565c0; color: #fff; margin-top: 8px; }
+  .btn-download:hover { background: #1976d2; }
+  .btn-download:disabled { background: #1a2a40; color: #666; cursor: not-allowed; }
+  .progress-wrap { margin-top: 10px; display: none; }
+  .progress-bar { background: #22252f; border-radius: 4px; height: 20px; overflow: hidden; }
+  .progress-fill { height: 100%; background: #1565c0; transition: width 0.3s ease; border-radius: 4px; }
+  .progress-text { font-size: 0.82rem; color: #aaa; margin-top: 4px; }
+
+  /* Buttons */
+  .btn-row { display: flex; gap: 10px; margin-top: 16px; }
+  button { padding: 10px 24px; border: none; border-radius: 6px; font-size: 0.9rem; font-weight: 500; cursor: pointer; transition: background 0.15s; }
+  .btn-start { background: #2e7d32; color: #fff; }
+  .btn-start:hover { background: #388e3c; }
+  .btn-start:disabled { background: #1b3d1e; color: #666; cursor: not-allowed; }
+  .btn-stop { background: #c62828; color: #fff; padding: 6px 14px; font-size: 0.8rem; }
+  .btn-stop:hover { background: #d32f2f; }
+  .btn-refresh { background: #333; color: #ccc; padding: 6px 14px; font-size: 0.8rem; }
+  .btn-refresh:hover { background: #444; }
+
+  /* Instances table */
+  .instance-list { display: flex; flex-direction: column; gap: 8px; }
+  .instance-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: #22252f; border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
+  .instance-row:hover { background: #2a2d3a; }
+  .instance-row.selected { border: 1px solid #6c8cff; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .dot-stopped { background: #666; }
+  .dot-starting { background: #ffb300; animation: pulse 1s infinite; }
+  .dot-running { background: #4caf50; }
+  .dot-error { background: #f44336; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .inst-info { flex: 1; display: flex; flex-wrap: wrap; gap: 4px 16px; }
+  .inst-info span { white-space: nowrap; }
+  .inst-label { color: #888; }
+  .no-instances { color: #666; font-size: 0.9rem; padding: 10px; }
+
+  /* Logs */
+  .logs { background: #0a0c10; border: 1px solid #222; border-radius: 4px; padding: 10px; font-family: "Fira Code", "Cascadia Code", monospace; font-size: 0.78rem; max-height: 350px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; color: #aaa; margin-top: 12px; line-height: 1.4; }
+</style>
+</head>
+<body>
+<h1>vLLM Multi-GPU Admin</h1>
+<div class="grid">
+
+  <!-- GPU Selection -->
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <h2 style="margin:0">GPUs</h2>
+      <button class="btn-refresh" onclick="loadGpus()">Refresh</button>
+    </div>
+    <div class="warning" id="gpu-warning"></div>
+    <div class="gpu-list" id="gpu-list">Loading...</div>
+  </div>
+
+  <!-- Model & Config -->
+  <div class="card">
+    <h2>Launch New Instance</h2>
+    <label style="margin-top:0">Model</label>
+    <select id="model-select"><option>Loading...</option></select>
+    <button class="btn-refresh" onclick="loadModels()" style="margin-top:6px">Refresh Models</button>
+
+    <label>GPU Memory Utilization</label>
+    <div class="slider-row">
+      <input type="range" id="mem-util" min="0.1" max="1.0" step="0.05" value="0.90">
+      <span class="slider-val" id="mem-util-val">0.90</span>
+    </div>
+
+    <label>Max Model Length (blank = auto)</label>
+    <input type="number" id="max-model-len" placeholder="e.g. 4096">
+
+    <label>Dtype</label>
+    <select id="dtype">
+      <option value="auto">auto</option>
+      <option value="float16">float16</option>
+      <option value="bfloat16">bfloat16</option>
+    </select>
+
+    <div class="btn-row">
+      <button class="btn-start" id="btn-start" onclick="startVllm()">Start Instance</button>
+    </div>
+  </div>
+
+  <!-- Download Model -->
+  <div class="card full-width">
+    <h2>Download Model from HuggingFace</h2>
+    <div style="display:flex;gap:10px;align-items:end">
+      <div style="flex:1">
+        <label style="margin-top:0">HuggingFace Repo ID</label>
+        <input type="text" id="hf-repo" placeholder="e.g. TinyLlama/TinyLlama-1.1B-Chat-v1.0">
+      </div>
+      <button class="btn-download" id="btn-download" onclick="downloadModel()">Download</button>
+    </div>
+    <div class="progress-wrap" id="progress-wrap">
+      <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+      <div class="progress-text" id="progress-text"></div>
+    </div>
+    <div class="dl-status" id="dl-status"></div>
+  </div>
+
+  <!-- Running Instances -->
+  <div class="card full-width">
+    <h2>Instances</h2>
+    <div class="instance-list" id="instance-list">
+      <div class="no-instances">No running instances</div>
+    </div>
+  </div>
+
+  <!-- Logs for selected instance -->
+  <div class="card full-width">
+    <h2>Logs <span id="logs-label" style="font-size:0.85rem;color:#888"></span></h2>
+    <div class="logs" id="logs"></div>
+  </div>
+
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+let gpuData = [];
+let selectedLogInstance = null;
+
+async function loadGpus() {
+  try {
+    const res = await fetch('/api/gpus');
+    gpuData = await res.json();
+    renderGpus();
+  } catch (e) {
+    $('gpu-list').innerHTML = '<div style="color:#f44">Failed to load GPUs</div>';
+  }
+}
+
+function renderGpus() {
+  const list = $('gpu-list');
+  if (gpuData.length && gpuData[0].error) {
+    list.innerHTML = '<div style="color:#f44">Error: ' + gpuData[0].error + '</div>';
+    return;
+  }
+  list.innerHTML = gpuData.map(g => {
+    const inUse = g.in_use;
+    const disabled = inUse ? 'disabled' : '';
+    const cls = inUse ? 'gpu-item in-use' : 'gpu-item';
+    const usedLabel = g.used_by ? `<span class="gpu-used">(${g.used_by})</span>` : '';
+    return `
+      <label class="${cls}">
+        <input type="checkbox" value="${g.index}" data-cc="${g.compute_capability}" ${disabled}>
+        <span class="gpu-name">GPU ${g.index}: ${g.name}</span>
+        ${usedLabel}
+        <span class="gpu-cc">CC ${g.compute_capability}</span>
+        <span class="gpu-mem">${g.memory_free_mb} / ${g.memory_total_mb} MB free</span>
+      </label>
+    `;
+  }).join('');
+  list.querySelectorAll('input:not(:disabled)').forEach(cb => cb.addEventListener('change', checkMixedArch));
+}
+
+function checkMixedArch() {
+  const checked = [...document.querySelectorAll('#gpu-list input:checked')];
+  const ccs = new Set(checked.map(cb => cb.dataset.cc));
+  const warn = $('gpu-warning');
+  if (ccs.size > 1) {
+    warn.textContent = 'Warning: Selected GPUs have different compute capabilities (' + [...ccs].join(', ') + '). This may cause issues with tensor parallelism.';
+    warn.style.display = 'block';
+  } else {
+    warn.style.display = 'none';
+  }
+}
+
+async function loadModels() {
+  try {
+    const res = await fetch('/api/models');
+    const models = await res.json();
+    const sel = $('model-select');
+    if (models.length === 0) {
+      sel.innerHTML = '<option value="">No models found in /models</option>';
+    } else {
+      sel.innerHTML = models.map(m => `<option value="${m}">${m}</option>`).join('');
+    }
+  } catch (e) {
+    $('model-select').innerHTML = '<option value="">Failed to load</option>';
+  }
+}
+
+async function startVllm() {
+  const gpuIds = [...document.querySelectorAll('#gpu-list input:checked')].map(cb => parseInt(cb.value));
+  if (gpuIds.length === 0) { alert('Select at least one GPU'); return; }
+  const model = $('model-select').value;
+  if (!model) { alert('Select a model'); return; }
+
+  const body = {
+    model: model,
+    gpu_ids: gpuIds,
+    gpu_memory_utilization: parseFloat($('mem-util').value),
+    dtype: $('dtype').value,
+  };
+  const maxLen = $('max-model-len').value;
+  if (maxLen) body.max_model_len = parseInt(maxLen);
+
+  $('btn-start').disabled = true;
+  try {
+    const res = await fetch('/api/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(data.error || 'Failed to start');
+    } else {
+      // Uncheck GPUs that were just assigned
+      document.querySelectorAll('#gpu-list input:checked').forEach(cb => cb.checked = false);
+      // Select new instance for logs
+      selectedLogInstance = data.id;
+    }
+  } catch (e) {
+    alert('Request failed: ' + e.message);
+  }
+  $('btn-start').disabled = false;
+}
+
+async function stopInstance(instanceId) {
+  try {
+    const res = await fetch('/api/stop', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ instance_id: instanceId }),
+    });
+    const data = await res.json();
+    if (!res.ok) alert(data.error || 'Failed to stop');
+    if (selectedLogInstance === instanceId) selectedLogInstance = null;
+  } catch (e) {
+    alert('Request failed: ' + e.message);
+  }
+}
+
+function selectInstanceLogs(instanceId) {
+  selectedLogInstance = instanceId;
+}
+
+async function pollStatus() {
+  try {
+    const res = await fetch('/api/status');
+    const data = await res.json();
+    const instances = data.instances || [];
+    const listEl = $('instance-list');
+
+    if (instances.length === 0) {
+      listEl.innerHTML = '<div class="no-instances">No running instances</div>';
+      $('logs').textContent = '';
+      $('logs-label').textContent = '';
+      return;
+    }
+
+    listEl.innerHTML = instances.map(s => {
+      const model = s.model ? s.model.split('/').pop() : '?';
+      const gpus = (s.gpu_ids || []).join(', ');
+      const apiUrl = s.port ? 'http://' + window.location.hostname + ':' + s.port : '';
+      const selected = s.id === selectedLogInstance ? ' selected' : '';
+      return `
+        <div class="instance-row${selected}" onclick="selectInstanceLogs('${s.id}')">
+          <div class="dot dot-${s.state}"></div>
+          <div class="inst-info">
+            <span><b>${s.id}</b></span>
+            <span><span class="inst-label">Model:</span> ${model}</span>
+            <span><span class="inst-label">GPUs:</span> ${gpus}</span>
+            ${apiUrl ? `<span><span class="inst-label">API:</span> ${apiUrl}</span>` : ''}
+            <span><span class="inst-label">dtype:</span> ${s.dtype || 'auto'}</span>
+            <span><span class="inst-label">TP:</span> ${s.tensor_parallel_size || '?'}</span>
+            <span><span class="inst-label">VRAM:</span> ${s.gpu_memory_utilization ? (s.gpu_memory_utilization * 100).toFixed(0) + '%' : '?'}</span>
+            ${s.max_model_len ? `<span><span class="inst-label">max_len:</span> ${s.max_model_len}</span>` : ''}
+            ${s.pid ? `<span><span class="inst-label">PID:</span> ${s.pid}</span>` : ''}
+          </div>
+          <button class="btn-stop" onclick="event.stopPropagation(); stopInstance('${s.id}')">Stop</button>
+        </div>
+      `;
+    }).join('');
+
+    // Update logs for selected instance
+    const sel = instances.find(s => s.id === selectedLogInstance);
+    if (sel) {
+      $('logs-label').textContent = '— ' + sel.id;
+      const logsEl = $('logs');
+      const atBottom = logsEl.scrollTop + logsEl.clientHeight >= logsEl.scrollHeight - 20;
+      logsEl.textContent = (sel.logs || []).join('\n');
+      if (atBottom) logsEl.scrollTop = logsEl.scrollHeight;
+    } else if (instances.length > 0) {
+      // Auto-select first instance
+      selectedLogInstance = instances[0].id;
+    } else {
+      $('logs-label').textContent = '';
+      $('logs').textContent = '';
+    }
+
+    // Refresh GPU list to update in_use status
+    loadGpus();
+  } catch (e) {}
+}
+
+// Download
+async function downloadModel() {
+  const repo = $('hf-repo').value.trim();
+  if (!repo) { alert('Enter a HuggingFace repo ID'); return; }
+  $('btn-download').disabled = true;
+  try {
+    const res = await fetch('/api/download', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ repo_id: repo }),
+    });
+    const data = await res.json();
+    if (!res.ok) alert(data.error || 'Failed to start download');
+  } catch (e) {
+    alert('Request failed: ' + e.message);
+    $('btn-download').disabled = false;
+  }
+}
+
+let _lastDlStatus = '';
+let _lastDlBytes = 0;
+let _lastDlTime = 0;
+
+function fmtBytes(b) {
+  if (b >= 1e9) return (b / 1e9).toFixed(2) + ' GB';
+  if (b >= 1e6) return (b / 1e6).toFixed(1) + ' MB';
+  if (b >= 1e3) return (b / 1e3).toFixed(0) + ' KB';
+  return b + ' B';
+}
+
+async function pollDownload() {
+  try {
+    const res = await fetch('/api/download/status');
+    const d = await res.json();
+    const el = $('dl-status');
+    const wrap = $('progress-wrap');
+    const fill = $('progress-fill');
+    const ptxt = $('progress-text');
+    el.className = 'dl-status ' + d.status;
+
+    if (d.status === 'idle') {
+      el.textContent = '';
+      wrap.style.display = 'none';
+      $('btn-download').disabled = false;
+    } else if (d.status === 'downloading') {
+      el.textContent = 'Downloading ' + d.repo_id + '...';
+      $('btn-download').disabled = true;
+      if (d.total_bytes > 0) {
+        const pct = Math.min(100, (d.downloaded_bytes / d.total_bytes * 100));
+        fill.style.width = pct.toFixed(1) + '%';
+        const now = Date.now();
+        let speedStr = '';
+        if (_lastDlTime > 0 && now > _lastDlTime) {
+          const delta = d.downloaded_bytes - _lastDlBytes;
+          const dt = (now - _lastDlTime) / 1000;
+          if (delta > 0 && dt > 0) {
+            speedStr = ' — ' + fmtBytes(delta / dt) + '/s';
+          }
+        }
+        _lastDlBytes = d.downloaded_bytes;
+        _lastDlTime = now;
+        ptxt.textContent = pct.toFixed(1) + '% — ' + fmtBytes(d.downloaded_bytes) + ' / ' + fmtBytes(d.total_bytes) + speedStr;
+        wrap.style.display = 'block';
+      } else {
+        wrap.style.display = 'none';
+      }
+    } else if (d.status === 'complete') {
+      el.textContent = 'Download complete: ' + d.repo_id;
+      fill.style.width = '100%';
+      ptxt.textContent = '100% — ' + fmtBytes(d.total_bytes);
+      wrap.style.display = d.total_bytes > 0 ? 'block' : 'none';
+      $('btn-download').disabled = false;
+      _lastDlBytes = 0; _lastDlTime = 0;
+      if (_lastDlStatus === 'downloading') loadModels();
+    } else if (d.status === 'error') {
+      el.textContent = 'Error: ' + d.error;
+      wrap.style.display = 'none';
+      $('btn-download').disabled = false;
+      _lastDlBytes = 0; _lastDlTime = 0;
+    }
+    _lastDlStatus = d.status;
+  } catch (e) {}
+}
+
+// Slider live update
+$('mem-util').addEventListener('input', function() {
+  $('mem-util-val').textContent = parseFloat(this.value).toFixed(2);
+});
+
+// Init
+loadGpus();
+loadModels();
+pollStatus();
+pollDownload();
+setInterval(pollStatus, 3000);
+setInterval(pollDownload, 3000);
+</script>
+</body>
+</html>
