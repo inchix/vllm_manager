@@ -29,6 +29,7 @@ class VllmConfig:
     max_model_len: Optional[int] = None
     dtype: str = "auto"
     model_impl: str = "auto"
+    extra_args: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -39,6 +40,7 @@ class VllmManager:
     process: Optional[subprocess.Popen] = None
     pid: Optional[int] = None
     logs: list[str] = field(default_factory=list)
+    _cmd: list[str] = field(default_factory=list)
     _log_task: Optional[asyncio.Task] = None
     _health_task: Optional[asyncio.Task] = None
     _on_exit: Optional[Callable] = None
@@ -56,6 +58,8 @@ class VllmManager:
         ]
         if config.max_model_len is not None:
             cmd.extend(["--max-model-len", str(config.max_model_len)])
+        if config.extra_args:
+            cmd.extend(config.extra_args)
         return cmd
 
     def _build_env(self, config: VllmConfig) -> dict[str, str]:
@@ -73,6 +77,7 @@ class VllmManager:
         self.logs = []
 
         cmd = self._build_cmd(config)
+        self._cmd = cmd
         env = self._build_env(config)
 
         logger.info("[%s] Starting vLLM on port %s: %s", self.instance_id, config.port, " ".join(cmd))
@@ -174,5 +179,7 @@ class VllmManager:
             "max_model_len": self.config.max_model_len if self.config else None,
             "tensor_parallel_size": self.config.tensor_parallel_size if self.config else None,
             "model_impl": self.config.model_impl if self.config else None,
+            "cmd": " ".join(self._cmd) if self._cmd else None,
+            "cuda_visible_devices": ",".join(str(g) for g in self.config.gpu_ids) if self.config else None,
             "logs": self.logs[-100:],
         }

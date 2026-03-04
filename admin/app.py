@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import shlex
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -136,6 +137,7 @@ class StartRequest(BaseModel):
     max_model_len: Optional[int] = None
     dtype: str = "auto"
     model_impl: str = "auto"
+    extra_args: str = ""
 
 
 @app.post("/api/start")
@@ -171,6 +173,16 @@ async def api_start(req: StartRequest):
     _instance_counter += 1
     instance_id = f"instance-{_instance_counter}"
 
+    # Parse and validate extra args
+    extra_args = []
+    if req.extra_args.strip():
+        try:
+            extra_args = shlex.split(req.extra_args)
+        except ValueError as e:
+            _available_ports.append(port)
+            _available_ports.sort()
+            return JSONResponse(status_code=400, content={"error": f"Invalid extra args: {e}"})
+
     config = VllmConfig(
         model=str(model_path),
         gpu_ids=req.gpu_ids,
@@ -180,6 +192,7 @@ async def api_start(req: StartRequest):
         max_model_len=req.max_model_len,
         dtype=req.dtype,
         model_impl=req.model_impl,
+        extra_args=extra_args,
     )
 
     mgr = VllmManager(instance_id=instance_id, _on_exit=_on_instance_exit)

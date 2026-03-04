@@ -63,9 +63,12 @@
 
   /* Instances table */
   .instance-list { display: flex; flex-direction: column; gap: 8px; }
-  .instance-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: #22252f; border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
+  .instance-row { display: flex; flex-direction: column; gap: 6px; padding: 10px 14px; background: #22252f; border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
   .instance-row:hover { background: #2a2d3a; }
   .instance-row.selected { border: 1px solid #6c8cff; }
+  .instance-header { display: flex; align-items: center; gap: 12px; }
+  .cmd-line { font-family: "Fira Code", "Cascadia Code", monospace; font-size: 0.75rem; color: #888; background: #181a22; padding: 6px 8px; border-radius: 4px; word-break: break-all; white-space: pre-wrap; }
+  .cmd-line .cmd-label { color: #6c8cff; }
   .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
   .dot-stopped { background: #666; }
   .dot-starting { background: #ffb300; animation: pulse 1s infinite; }
@@ -127,6 +130,9 @@
       <option value="transformers">transformers (generic HF backend)</option>
       <option value="vllm">vllm (force native only)</option>
     </select>
+
+    <label>Extra vLLM Args (optional)</label>
+    <input type="text" id="extra-args" placeholder="e.g. --enforce-eager --max-num-seqs 32">
 
     <div class="btn-row">
       <button class="btn-start" id="btn-start" onclick="startVllm()">Start Instance</button>
@@ -266,6 +272,7 @@ async function startVllm() {
     gpu_memory_utilization: parseFloat($('mem-util').value),
     dtype: $('dtype').value,
     model_impl: $('model-impl').value,
+    extra_args: $('extra-args').value.trim(),
   };
   const maxLen = $('max-model-len').value;
   if (maxLen) body.max_model_len = parseInt(maxLen);
@@ -330,21 +337,25 @@ async function pollStatus() {
       const gpus = (s.gpu_ids || []).join(', ');
       const apiUrl = s.port ? 'http://' + window.location.hostname + ':' + s.port : '';
       const selected = s.id === selectedLogInstance ? ' selected' : '';
+      const cmdLine = s.cmd ? `<div class="cmd-line"><span class="cmd-label">CUDA_VISIBLE_DEVICES=${s.cuda_visible_devices || ''}</span> ${s.cmd}</div>` : '';
       return `
         <div class="instance-row${selected}" onclick="selectInstanceLogs('${s.id}')">
-          <div class="dot dot-${s.state}"></div>
-          <div class="inst-info">
-            <span><b>${s.id}</b></span>
-            <span><span class="inst-label">Model:</span> ${model}</span>
-            <span><span class="inst-label">GPUs:</span> ${gpus}</span>
-            ${apiUrl ? `<span><span class="inst-label">API:</span> ${apiUrl}</span>` : ''}
-            <span><span class="inst-label">dtype:</span> ${s.dtype || 'auto'}</span>
-            <span><span class="inst-label">TP:</span> ${s.tensor_parallel_size || '?'}</span>
-            <span><span class="inst-label">VRAM:</span> ${s.gpu_memory_utilization ? (s.gpu_memory_utilization * 100).toFixed(0) + '%' : '?'}</span>
-            ${s.max_model_len ? `<span><span class="inst-label">max_len:</span> ${s.max_model_len}</span>` : ''}
-            ${s.pid ? `<span><span class="inst-label">PID:</span> ${s.pid}</span>` : ''}
+          <div class="instance-header">
+            <div class="dot dot-${s.state}"></div>
+            <div class="inst-info">
+              <span><b>${s.id}</b></span>
+              <span><span class="inst-label">Model:</span> ${model}</span>
+              <span><span class="inst-label">GPUs:</span> ${gpus}</span>
+              ${apiUrl ? `<span><span class="inst-label">API:</span> ${apiUrl}</span>` : ''}
+              <span><span class="inst-label">dtype:</span> ${s.dtype || 'auto'}</span>
+              <span><span class="inst-label">TP:</span> ${s.tensor_parallel_size || '?'}</span>
+              <span><span class="inst-label">VRAM:</span> ${s.gpu_memory_utilization ? (s.gpu_memory_utilization * 100).toFixed(0) + '%' : '?'}</span>
+              ${s.max_model_len ? `<span><span class="inst-label">max_len:</span> ${s.max_model_len}</span>` : ''}
+              ${s.pid ? `<span><span class="inst-label">PID:</span> ${s.pid}</span>` : ''}
+            </div>
+            <button class="btn-stop" onclick="event.stopPropagation(); stopInstance('${s.id}')">Stop</button>
           </div>
-          <button class="btn-stop" onclick="event.stopPropagation(); stopInstance('${s.id}')">Stop</button>
+          ${cmdLine}
         </div>
       `;
     }).join('');
