@@ -185,7 +185,10 @@ async function loadGpus() {
 function renderGpus() {
   const list = $('gpu-list');
   if (gpuData.length && gpuData[0].error) {
-    list.innerHTML = '<div style="color:#f44">Error: ' + gpuData[0].error + '</div>';
+    const errDiv = document.createElement('div');
+    errDiv.style.color = '#f44';
+    errDiv.textContent = 'Error: ' + gpuData[0].error;
+    list.replaceChildren(errDiv);
     return;
   }
   list.innerHTML = gpuData.map(g => {

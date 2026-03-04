@@ -7,7 +7,6 @@ from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from admin.vllm_manager import State, VllmConfig, VllmManager
@@ -32,6 +31,17 @@ _download_state = {
 }
 
 MODELS_DIR = Path(os.getenv("MODELS_DIR", "/models"))
+
+ALLOWED_DTYPES = {"auto", "float16", "bfloat16", "float32"}
+ALLOWED_MODEL_IMPLS = {"auto", "transformers", "vllm"}
+
+
+def _safe_model_path(name: str) -> Optional[Path]:
+    """Resolve model name to a path within MODELS_DIR, or None if invalid."""
+    resolved = (MODELS_DIR / name).resolve()
+    if not resolved.is_relative_to(MODELS_DIR.resolve()):
+        return None
+    return resolved
 
 
 def _on_instance_exit(instance_id: str) -> None:
@@ -132,6 +142,15 @@ class StartRequest(BaseModel):
 async def api_start(req: StartRequest):
     global _instance_counter
 
+    # Validate inputs
+    if req.dtype not in ALLOWED_DTYPES:
+        return JSONResponse(status_code=400, content={"error": f"Invalid dtype: {req.dtype}"})
+    if req.model_impl not in ALLOWED_MODEL_IMPLS:
+        return JSONResponse(status_code=400, content={"error": f"Invalid model_impl: {req.model_impl}"})
+    model_path = _safe_model_path(req.model)
+    if not model_path or not model_path.is_dir():
+        return JSONResponse(status_code=400, content={"error": "Invalid model name"})
+
     # Check GPU conflicts
     overlap = set(req.gpu_ids) & _used_gpus
     if overlap:
@@ -153,7 +172,7 @@ async def api_start(req: StartRequest):
     instance_id = f"instance-{_instance_counter}"
 
     config = VllmConfig(
-        model=str(MODELS_DIR / req.model),
+        model=str(model_path),
         gpu_ids=req.gpu_ids,
         tensor_parallel_size=len(req.gpu_ids),
         port=port,
@@ -210,9 +229,9 @@ class DeleteModelRequest(BaseModel):
 
 @app.post("/api/models/delete")
 def api_delete_model(req: DeleteModelRequest):
-    model_path = MODELS_DIR / req.model
-    if not model_path.exists() or not model_path.is_dir():
-        return JSONResponse(status_code=404, content={"error": f"Model '{req.model}' not found"})
+    model_path = _safe_model_path(req.model)
+    if not model_path or not model_path.exists() or not model_path.is_dir():
+        return JSONResponse(status_code=400, content={"error": "Invalid model name"})
 
     # Check if model is in use by a running instance
     full_path = str(model_path)
@@ -249,10 +268,10 @@ def _do_download(repo_id: str) -> None:
             if self.total:
                 _download_state["total_bytes"] = self.total
 
-    # Use the last component of the repo ID as the local dir name
-    # e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0" -> "TinyLlama-1.1B-Chat-v1.0"
     local_name = repo_id.split("/")[-1]
-    local_dir = MODELS_DIR / local_name
+    local_dir = _safe_model_path(local_name)
+    if not local_dir:
+        raise ValueError(f"Invalid repo ID: {repo_id}")
 
     snapshot_download(
         repo_id,
@@ -298,5 +317,6 @@ def api_download_status():
 @app.get("/")
 def root():
     return FileResponse(
-        Path(__file__).parent / "static" / "index.html"
+        Path(__file__).parent / "static" / "index.html",
+        headers={"Cache-Control": "no-cache"},
     )
