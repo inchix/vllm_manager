@@ -100,7 +100,10 @@
     <h2>Launch New Instance</h2>
     <label style="margin-top:0">Model</label>
     <select id="model-select"><option>Loading...</option></select>
-    <button class="btn-refresh" onclick="loadModels()" style="margin-top:6px">Refresh Models</button>
+    <div style="display:flex;gap:8px;margin-top:6px">
+      <button class="btn-refresh" onclick="loadModels()">Refresh Models</button>
+      <button class="btn-stop" onclick="deleteModel()">Delete Model</button>
+    </div>
 
     <label>GPU Memory Utilization</label>
     <div class="slider-row">
@@ -212,6 +215,24 @@ function checkMixedArch() {
     warn.style.display = 'block';
   } else {
     warn.style.display = 'none';
+  }
+}
+
+async function deleteModel() {
+  const model = $('model-select').value;
+  if (!model) { alert('Select a model to delete'); return; }
+  if (!confirm('Delete model "' + model + '"? This cannot be undone.')) return;
+  try {
+    const res = await fetch('/api/models/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ model }),
+    });
+    const data = await res.json();
+    if (!res.ok) { alert(data.error || 'Failed to delete'); return; }
+    loadModels();
+  } catch (e) {
+    alert('Request failed: ' + e.message);
   }
 }
 

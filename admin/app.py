@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -201,6 +202,30 @@ async def api_stop(req: StopRequest):
 
     del _instances[req.instance_id]
     return {"status": "stopped", "instance_id": req.instance_id}
+
+
+class DeleteModelRequest(BaseModel):
+    model: str
+
+
+@app.post("/api/models/delete")
+def api_delete_model(req: DeleteModelRequest):
+    model_path = MODELS_DIR / req.model
+    if not model_path.exists() or not model_path.is_dir():
+        return JSONResponse(status_code=404, content={"error": f"Model '{req.model}' not found"})
+
+    # Check if model is in use by a running instance
+    full_path = str(model_path)
+    for iid, inst in _instances.items():
+        if inst.config and inst.config.model == full_path and inst.state in (State.RUNNING, State.STARTING):
+            return JSONResponse(
+                status_code=409,
+                content={"error": f"Model is in use by {iid}. Stop the instance first."},
+            )
+
+    shutil.rmtree(model_path)
+    logger.info("Deleted model: %s", req.model)
+    return {"status": "deleted", "model": req.model}
 
 
 class DownloadRequest(BaseModel):
