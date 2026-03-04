@@ -98,6 +98,7 @@ RUN_ARGS=(
   --tmpfs "/tmp:rw,size=$TMP_SIZE"
   --tmpfs "/root/.cache:rw,size=$CACHE_SIZE"
   --tmpfs "/root/.triton:rw,size=$CACHE_SIZE"
+  --tmpfs "/root/.config:rw,size=64m"
 )
 
 [ "$READ_ONLY" = "true" ] && RUN_ARGS+=(--read-only)
