@@ -29,6 +29,7 @@ class VllmConfig:
     max_model_len: Optional[int] = None
     dtype: str = "auto"
     model_impl: str = "auto"
+    disable_image_processor: bool = False
     extra_args: list[str] = field(default_factory=list)
 
 
@@ -58,6 +59,8 @@ class VllmManager:
         ]
         if config.max_model_len is not None:
             cmd.extend(["--max-model-len", str(config.max_model_len)])
+        if config.disable_image_processor:
+            cmd.append("--disable-image-processor")
         if config.extra_args:
             cmd.extend(config.extra_args)
         return cmd
