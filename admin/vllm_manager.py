@@ -50,6 +50,10 @@ class VllmManager:
         cmd = [
             "python3", "-m", "vllm.entrypoints.openai.api_server",
             "--model", config.model,
+        ]
+        if config.disable_image_processor:
+            cmd.append("--disable-image-processor")
+        cmd.extend([
             "--tensor-parallel-size", str(config.tensor_parallel_size),
             "--gpu-memory-utilization", str(config.gpu_memory_utilization),
             "--dtype", config.dtype,
@@ -59,8 +63,6 @@ class VllmManager:
         ]
         if config.max_model_len is not None:
             cmd.extend(["--max-model-len", str(config.max_model_len)])
-        if config.disable_image_processor:
-            cmd.append("--disable-image-processor")
         if config.extra_args:
             cmd.extend(config.extra_args)
         return cmd
