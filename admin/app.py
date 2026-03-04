@@ -124,6 +124,7 @@ class StartRequest(BaseModel):
     gpu_memory_utilization: float = 0.90
     max_model_len: Optional[int] = None
     dtype: str = "auto"
+    model_impl: str = "auto"
 
 
 @app.post("/api/start")
@@ -158,6 +159,7 @@ async def api_start(req: StartRequest):
         gpu_memory_utilization=req.gpu_memory_utilization,
         max_model_len=req.max_model_len,
         dtype=req.dtype,
+        model_impl=req.model_impl,
     )
 
     mgr = VllmManager(instance_id=instance_id, _on_exit=_on_instance_exit)

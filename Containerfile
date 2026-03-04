@@ -1,4 +1,4 @@
-FROM docker.io/vllm/vllm-openai:latest
+FROM docker.io/vllm/vllm-openai:nightly
 
 RUN pip install --no-cache-dir nvidia-ml-py
 

@@ -28,6 +28,7 @@ class VllmConfig:
     gpu_memory_utilization: float = 0.90
     max_model_len: Optional[int] = None
     dtype: str = "auto"
+    model_impl: str = "auto"
 
 
 @dataclass
@@ -51,6 +52,7 @@ class VllmManager:
             "--dtype", config.dtype,
             "--host", "0.0.0.0",
             "--port", str(config.port),
+            "--model-impl", config.model_impl,
         ]
         if config.max_model_len is not None:
             cmd.extend(["--max-model-len", str(config.max_model_len)])
@@ -58,6 +60,7 @@ class VllmManager:
 
     def _build_env(self, config: VllmConfig) -> dict[str, str]:
         env = os.environ.copy()
+        env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in config.gpu_ids)
         return env
 
@@ -170,5 +173,6 @@ class VllmManager:
             "gpu_memory_utilization": self.config.gpu_memory_utilization if self.config else None,
             "max_model_len": self.config.max_model_len if self.config else None,
             "tensor_parallel_size": self.config.tensor_parallel_size if self.config else None,
+            "model_impl": self.config.model_impl if self.config else None,
             "logs": self.logs[-100:],
         }

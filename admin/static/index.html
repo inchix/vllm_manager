@@ -118,6 +118,13 @@
       <option value="bfloat16">bfloat16</option>
     </select>
 
+    <label>Model Backend</label>
+    <select id="model-impl">
+      <option value="auto">auto (native vLLM)</option>
+      <option value="transformers">transformers (generic HF backend)</option>
+      <option value="vllm">vllm (force native only)</option>
+    </select>
+
     <div class="btn-row">
       <button class="btn-start" id="btn-start" onclick="startVllm()">Start Instance</button>
     </div>
@@ -234,6 +241,7 @@ async function startVllm() {
     gpu_ids: gpuIds,
     gpu_memory_utilization: parseFloat($('mem-util').value),
     dtype: $('dtype').value,
+    model_impl: $('model-impl').value,
   };
   const maxLen = $('max-model-len').value;
   if (maxLen) body.max_model_len = parseInt(maxLen);
