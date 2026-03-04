@@ -60,7 +60,7 @@ class VllmManager:
             "--host", "0.0.0.0",
             "--port", str(config.port),
             "--model-impl", config.model_impl,
-        ]
+        ])
         if config.max_model_len is not None:
             cmd.extend(["--max-model-len", str(config.max_model_len)])
         if config.extra_args:
