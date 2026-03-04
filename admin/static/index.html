@@ -132,7 +132,7 @@
     </select>
 
     <label style="display:flex;align-items:center;gap:8px;margin-top:14px;cursor:pointer;color:#e0e0e0">
-      <input type="checkbox" id="disable-image-proc" style="accent-color:#6c8cff"> Disable image processor
+      <input type="checkbox" id="language-model-only" style="accent-color:#6c8cff"> Language model only (skip image/multimodal processing)
     </label>
 
     <label>Extra vLLM Args (optional)</label>
@@ -276,7 +276,7 @@ async function startVllm() {
     gpu_memory_utilization: parseFloat($('mem-util').value),
     dtype: $('dtype').value,
     model_impl: $('model-impl').value,
-    disable_image_processor: $('disable-image-proc').checked,
+    language_model_only: $('language-model-only').checked,
     extra_args: $('extra-args').value.trim(),
   };
   const maxLen = $('max-model-len').value;

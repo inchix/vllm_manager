@@ -29,7 +29,7 @@ class VllmConfig:
     max_model_len: Optional[int] = None
     dtype: str = "auto"
     model_impl: str = "auto"
-    disable_image_processor: bool = False
+    language_model_only: bool = False
     extra_args: list[str] = field(default_factory=list)
 
 
@@ -51,8 +51,8 @@ class VllmManager:
             "python3", "-m", "vllm.entrypoints.openai.api_server",
             "--model", config.model,
         ]
-        if config.disable_image_processor:
-            cmd.append("--disable-image-processor")
+        if config.language_model_only:
+            cmd.append("--language-model-only")
         cmd.extend([
             "--tensor-parallel-size", str(config.tensor_parallel_size),
             "--gpu-memory-utilization", str(config.gpu_memory_utilization),

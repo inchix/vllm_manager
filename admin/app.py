@@ -137,7 +137,7 @@ class StartRequest(BaseModel):
     max_model_len: Optional[int] = None
     dtype: str = "auto"
     model_impl: str = "auto"
-    disable_image_processor: bool = False
+    language_model_only: bool = False
     extra_args: str = ""
 
 
@@ -193,7 +193,7 @@ async def api_start(req: StartRequest):
         max_model_len=req.max_model_len,
         dtype=req.dtype,
         model_impl=req.model_impl,
-        disable_image_processor=req.disable_image_processor,
+        language_model_only=req.language_model_only,
         extra_args=extra_args,
     )
 
