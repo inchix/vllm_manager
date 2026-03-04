@@ -82,6 +82,23 @@
 
   /* Logs */
   .logs { background: #0a0c10; border: 1px solid #222; border-radius: 4px; padding: 10px; font-family: "Fira Code", "Cascadia Code", monospace; font-size: 0.78rem; max-height: 350px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; color: #aaa; margin-top: 12px; line-height: 1.4; }
+
+  /* Chat test */
+  .chat-messages { background: #0a0c10; border: 1px solid #222; border-radius: 4px; padding: 10px; max-height: 400px; overflow-y: auto; margin-bottom: 12px; min-height: 100px; }
+  .chat-msg { margin-bottom: 10px; font-size: 0.88rem; line-height: 1.5; }
+  .chat-msg .chat-role { font-weight: 600; margin-bottom: 2px; }
+  .chat-role-user { color: #6c8cff; }
+  .chat-role-assistant { color: #4caf50; }
+  .chat-role-tool { color: #ffb300; }
+  .chat-tool-call { background: #1a2a1a; border: 1px solid #2e7d32; border-radius: 4px; padding: 8px; margin: 4px 0; font-family: monospace; font-size: 0.82rem; white-space: pre-wrap; word-break: break-all; }
+  .chat-input-row { display: flex; gap: 10px; }
+  .chat-input-row input[type="text"] { flex: 1; }
+  .chat-input-row button { flex-shrink: 0; }
+  textarea { width: 100%; padding: 8px; background: #22252f; border: 1px solid #333; color: #e0e0e0; border-radius: 4px; font-family: monospace; font-size: 0.82rem; resize: vertical; min-height: 60px; }
+  .chat-controls { display: flex; gap: 10px; align-items: end; margin-bottom: 12px; flex-wrap: wrap; }
+  .chat-controls > div { min-width: 150px; }
+  .tool-result-row { display: flex; gap: 8px; align-items: start; margin-top: 8px; }
+  .tool-result-row textarea { flex: 1; min-height: 40px; }
 </style>
 </head>
 <body>
@@ -135,6 +152,26 @@
       <input type="checkbox" id="language-model-only" style="accent-color:#6c8cff"> Language model only (skip image/multimodal processing)
     </label>
 
+    <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer;color:#e0e0e0">
+      <input type="checkbox" id="enable-tool-use" style="accent-color:#6c8cff"
+             onchange="$('tool-parser-row').style.display = this.checked ? 'block' : 'none'"> Enable tool use (--enable-auto-tool-choice)
+    </label>
+    <div id="tool-parser-row" style="display:none">
+      <label>Tool Call Parser</label>
+      <select id="tool-call-parser">
+        <option value="">-- select parser --</option>
+        <option value="hermes">hermes</option>
+        <option value="llama3_json">llama3_json</option>
+        <option value="llama4_json">llama4_json</option>
+        <option value="mistral">mistral</option>
+        <option value="qwen3_xml">qwen3_xml</option>
+        <option value="qwen3_coder">qwen3_coder</option>
+        <option value="deepseek_v3">deepseek_v3</option>
+        <option value="pythonic">pythonic</option>
+        <option value="openai">openai</option>
+      </select>
+    </div>
+
     <label>Extra vLLM Args (optional)</label>
     <input type="text" id="extra-args" placeholder="e.g. --enforce-eager --max-num-seqs 32">
 
@@ -172,6 +209,40 @@
   <div class="card full-width">
     <h2>Logs <span id="logs-label" style="font-size:0.85rem;color:#888"></span></h2>
     <div class="logs" id="logs"></div>
+  </div>
+
+  <!-- Chat Test -->
+  <div class="card full-width">
+    <h2>Chat Test</h2>
+    <div class="chat-controls">
+      <div>
+        <label style="margin-top:0">Instance</label>
+        <select id="chat-instance"><option value="">No running instances</option></select>
+      </div>
+      <div style="max-width:100px">
+        <label style="margin-top:0">Temperature</label>
+        <input type="number" id="chat-temp" value="0.7" min="0" max="2" step="0.1">
+      </div>
+      <div style="max-width:120px">
+        <label style="margin-top:0">Max Tokens</label>
+        <input type="number" id="chat-max-tokens" value="1024" min="1">
+      </div>
+      <div style="align-self:end">
+        <button class="btn-refresh" onclick="chatClear()">Clear</button>
+      </div>
+    </div>
+    <details style="margin-bottom:12px">
+      <summary style="cursor:pointer;color:#a0a8c0;font-size:0.88rem">Tool Definitions (JSON, optional)</summary>
+      <textarea id="chat-tools" rows="6" placeholder='[{"type":"function","function":{"name":"get_weather","description":"Get current weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}]'></textarea>
+    </details>
+    <div class="chat-messages" id="chat-messages">
+      <div style="color:#666;font-size:0.85rem">Send a message to start chatting.</div>
+    </div>
+    <div id="tool-results"></div>
+    <div class="chat-input-row">
+      <input type="text" id="chat-input" placeholder="Type a message..." onkeydown="if(event.key==='Enter')chatSend()">
+      <button class="btn-start" onclick="chatSend()">Send</button>
+    </div>
   </div>
 
 </div>
@@ -277,6 +348,8 @@ async function startVllm() {
     dtype: $('dtype').value,
     model_impl: $('model-impl').value,
     language_model_only: $('language-model-only').checked,
+    enable_tool_use: $('enable-tool-use').checked,
+    tool_call_parser: $('enable-tool-use').checked ? ($('tool-call-parser').value || null) : null,
     extra_args: $('extra-args').value.trim(),
   };
   const maxLen = $('max-model-len').value;
@@ -357,6 +430,7 @@ async function pollStatus() {
               <span><span class="inst-label">VRAM:</span> ${s.gpu_memory_utilization ? (s.gpu_memory_utilization * 100).toFixed(0) + '%' : '?'}</span>
               ${s.max_model_len ? `<span><span class="inst-label">max_len:</span> ${s.max_model_len}</span>` : ''}
               ${s.pid ? `<span><span class="inst-label">PID:</span> ${s.pid}</span>` : ''}
+              ${s.enable_tool_use ? `<span><span class="inst-label">Tools:</span> ${s.tool_call_parser || 'auto'}</span>` : ''}
             </div>
             <button class="btn-stop" onclick="event.stopPropagation(); stopInstance('${s.id}')">Stop</button>
           </div>
@@ -380,6 +454,9 @@ async function pollStatus() {
       $('logs-label').textContent = '';
       $('logs').textContent = '';
     }
+
+    // Update chat instance dropdown
+    updateChatInstances(instances);
 
     // Refresh GPU list to update in_use status
     loadGpus();
@@ -468,6 +545,148 @@ async function pollDownload() {
     }
     _lastDlStatus = d.status;
   } catch (e) {}
+}
+
+// Chat test
+let chatMessages = [];
+let pendingToolCalls = [];
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function chatClear() {
+  chatMessages = [];
+  pendingToolCalls = [];
+  $('chat-messages').innerHTML = '<div style="color:#666;font-size:0.85rem">Send a message to start chatting.</div>';
+  $('tool-results').innerHTML = '';
+}
+
+function renderChat() {
+  const el = $('chat-messages');
+  if (chatMessages.length === 0) {
+    el.innerHTML = '<div style="color:#666;font-size:0.85rem">Send a message to start chatting.</div>';
+    return;
+  }
+  el.innerHTML = chatMessages.map(m => {
+    let roleClass = 'chat-role-' + m.role;
+    let content = m.content ? escapeHtml(m.content) : '';
+    let toolCallsHtml = '';
+    if (m.tool_calls && m.tool_calls.length > 0) {
+      toolCallsHtml = m.tool_calls.map(tc => {
+        const args = typeof tc.function.arguments === 'string'
+          ? tc.function.arguments : JSON.stringify(tc.function.arguments, null, 2);
+        return `<div class="chat-tool-call">Tool call: <b>${escapeHtml(tc.function.name)}</b>\n${escapeHtml(args)}</div>`;
+      }).join('');
+    }
+    let roleLabel = m.role;
+    if (m.role === 'tool') roleLabel = 'tool (' + (m.name || '') + ')';
+    return `<div class="chat-msg"><div class="chat-role ${roleClass}">${roleLabel}</div>${content}${toolCallsHtml}</div>`;
+  }).join('');
+  el.scrollTop = el.scrollHeight;
+}
+
+function renderToolResultInputs() {
+  const el = $('tool-results');
+  if (pendingToolCalls.length === 0) { el.innerHTML = ''; return; }
+  el.innerHTML = '<div style="color:#ffb300;font-size:0.85rem;margin-bottom:6px">Provide tool results:</div>' +
+    pendingToolCalls.map((tc, i) => `
+      <div class="tool-result-row">
+        <span style="font-size:0.82rem;min-width:120px;color:#ffb300">${escapeHtml(tc.function.name)}:</span>
+        <textarea id="tool-result-${i}" rows="2" placeholder="Tool result (text or JSON)"></textarea>
+      </div>
+    `).join('') +
+    '<div style="margin-top:8px"><button class="btn-start" onclick="submitToolResults()">Submit Tool Results</button></div>';
+}
+
+async function submitToolResults() {
+  pendingToolCalls.forEach((tc, i) => {
+    const result = document.getElementById('tool-result-' + i).value || '(no result)';
+    chatMessages.push({ role: 'tool', tool_call_id: tc.id, name: tc.function.name, content: result });
+  });
+  pendingToolCalls = [];
+  $('tool-results').innerHTML = '';
+  renderChat();
+  await chatComplete();
+}
+
+async function chatSend() {
+  const input = $('chat-input');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  chatMessages.push({ role: 'user', content: text });
+  renderChat();
+  await chatComplete();
+}
+
+async function chatComplete() {
+  const instanceId = $('chat-instance').value;
+  if (!instanceId) { alert('Select a running instance'); return; }
+
+  let tools = null;
+  const toolsText = $('chat-tools').value.trim();
+  if (toolsText) {
+    try { tools = JSON.parse(toolsText); }
+    catch (e) { alert('Invalid tools JSON: ' + e.message); return; }
+  }
+
+  const body = {
+    instance_id: instanceId,
+    messages: chatMessages,
+    temperature: parseFloat($('chat-temp').value) || 0.7,
+    max_tokens: parseInt($('chat-max-tokens').value) || 1024,
+  };
+  if (tools) body.tools = tools;
+
+  const msgEl = $('chat-messages');
+  msgEl.innerHTML += '<div class="chat-msg" id="chat-loading" style="color:#888">Waiting for response...</div>';
+  msgEl.scrollTop = msgEl.scrollHeight;
+
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    const ld = document.getElementById('chat-loading');
+    if (ld) ld.remove();
+
+    if (!res.ok) { alert(data.error || JSON.stringify(data)); return; }
+
+    const choice = data.choices && data.choices[0];
+    if (!choice) { alert('No response from model'); return; }
+
+    chatMessages.push(choice.message);
+    renderChat();
+
+    if (choice.message.tool_calls && choice.message.tool_calls.length > 0) {
+      pendingToolCalls = choice.message.tool_calls;
+      renderToolResultInputs();
+    }
+  } catch (e) {
+    const ld = document.getElementById('chat-loading');
+    if (ld) ld.remove();
+    alert('Chat request failed: ' + e.message);
+  }
+}
+
+function updateChatInstances(instances) {
+  const sel = $('chat-instance');
+  const prev = sel.value;
+  const running = instances.filter(s => s.state === 'running');
+  if (running.length === 0) {
+    sel.innerHTML = '<option value="">No running instances</option>';
+  } else {
+    sel.innerHTML = running.map(s => {
+      const model = s.model ? s.model.split('/').pop() : '?';
+      return `<option value="${s.id}">${s.id} — ${model} (port ${s.port})</option>`;
+    }).join('');
+    if (running.find(s => s.id === prev)) sel.value = prev;
+  }
 }
 
 // Slider live update

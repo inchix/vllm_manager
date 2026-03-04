@@ -30,6 +30,8 @@ class VllmConfig:
     dtype: str = "auto"
     model_impl: str = "auto"
     language_model_only: bool = False
+    enable_tool_use: bool = False
+    tool_call_parser: Optional[str] = None
     extra_args: list[str] = field(default_factory=list)
 
 
@@ -53,6 +55,10 @@ class VllmManager:
         ]
         if config.language_model_only:
             cmd.append("--language-model-only")
+        if config.enable_tool_use:
+            cmd.append("--enable-auto-tool-choice")
+            if config.tool_call_parser:
+                cmd.extend(["--tool-call-parser", config.tool_call_parser])
         cmd.extend([
             "--tensor-parallel-size", str(config.tensor_parallel_size),
             "--gpu-memory-utilization", str(config.gpu_memory_utilization),
@@ -184,6 +190,8 @@ class VllmManager:
             "max_model_len": self.config.max_model_len if self.config else None,
             "tensor_parallel_size": self.config.tensor_parallel_size if self.config else None,
             "model_impl": self.config.model_impl if self.config else None,
+            "enable_tool_use": self.config.enable_tool_use if self.config else False,
+            "tool_call_parser": self.config.tool_call_parser if self.config else None,
             "cmd": " ".join(self._cmd) if self._cmd else None,
             "cuda_visible_devices": ",".join(str(g) for g in self.config.gpu_ids) if self.config else None,
             "logs": self.logs[-100:],

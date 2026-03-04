@@ -35,6 +35,10 @@ MODELS_DIR = Path(os.getenv("MODELS_DIR", "/models"))
 
 ALLOWED_DTYPES = {"auto", "float16", "bfloat16", "float32"}
 ALLOWED_MODEL_IMPLS = {"auto", "transformers", "vllm"}
+ALLOWED_TOOL_PARSERS = {
+    "hermes", "llama3_json", "llama4_json", "mistral",
+    "qwen3_xml", "qwen3_coder", "deepseek_v3", "pythonic", "openai",
+}
 
 
 def _safe_model_path(name: str) -> Optional[Path]:
@@ -138,6 +142,8 @@ class StartRequest(BaseModel):
     dtype: str = "auto"
     model_impl: str = "auto"
     language_model_only: bool = False
+    enable_tool_use: bool = False
+    tool_call_parser: Optional[str] = None
     extra_args: str = ""
 
 
@@ -150,6 +156,8 @@ async def api_start(req: StartRequest):
         return JSONResponse(status_code=400, content={"error": f"Invalid dtype: {req.dtype}"})
     if req.model_impl not in ALLOWED_MODEL_IMPLS:
         return JSONResponse(status_code=400, content={"error": f"Invalid model_impl: {req.model_impl}"})
+    if req.tool_call_parser and req.tool_call_parser not in ALLOWED_TOOL_PARSERS:
+        return JSONResponse(status_code=400, content={"error": f"Invalid tool_call_parser: {req.tool_call_parser}"})
     model_path = _safe_model_path(req.model)
     if not model_path or not model_path.is_dir():
         return JSONResponse(status_code=400, content={"error": "Invalid model name"})
@@ -194,6 +202,8 @@ async def api_start(req: StartRequest):
         dtype=req.dtype,
         model_impl=req.model_impl,
         language_model_only=req.language_model_only,
+        enable_tool_use=req.enable_tool_use,
+        tool_call_parser=req.tool_call_parser,
         extra_args=extra_args,
     )
 
@@ -327,6 +337,46 @@ async def api_download(req: DownloadRequest):
 @app.get("/api/download/status")
 def api_download_status():
     return _download_state
+
+
+class ChatRequest(BaseModel):
+    instance_id: str
+    messages: list[dict]
+    tools: Optional[list[dict]] = None
+    temperature: float = 0.7
+    max_tokens: int = 1024
+
+
+@app.post("/api/chat")
+async def api_chat(req: ChatRequest):
+    mgr = _instances.get(req.instance_id)
+    if not mgr:
+        return JSONResponse(status_code=404, content={"error": "Instance not found"})
+    if mgr.state != State.RUNNING:
+        return JSONResponse(status_code=409, content={"error": f"Instance is {mgr.state.value}, not running"})
+
+    port = mgr.config.port
+    model = mgr.config.model
+
+    payload = {
+        "model": model,
+        "messages": req.messages,
+        "temperature": req.temperature,
+        "max_tokens": req.max_tokens,
+    }
+    if req.tools:
+        payload["tools"] = req.tools
+
+    import httpx
+    async with httpx.AsyncClient(timeout=120) as client:
+        try:
+            resp = await client.post(
+                f"http://localhost:{port}/v1/chat/completions",
+                json=payload,
+            )
+            return JSONResponse(content=resp.json(), status_code=resp.status_code)
+        except httpx.RequestError as e:
+            return JSONResponse(status_code=502, content={"error": f"Failed to reach vLLM: {e}"})
 
 
 @app.get("/")
