@@ -125,6 +125,9 @@
       <button class="btn-stop" onclick="deleteModel()">Delete Model</button>
     </div>
 
+    <label>Served Model Name (display name, optional)</label>
+    <input type="text" id="served-model-name" placeholder="Leave blank to use model path">
+
     <label>GPU Memory Utilization</label>
     <div class="slider-row">
       <input type="range" id="mem-util" min="0.1" max="1.0" step="0.05" value="0.90">
@@ -147,6 +150,14 @@
       <option value="transformers">transformers (generic HF backend)</option>
       <option value="vllm">vllm (force native only)</option>
     </select>
+
+    <label>Pipeline Parallel Size (default 1 = off)</label>
+    <input type="number" id="pp-size" value="1" min="1" max="8"
+           onchange="$('pp-partition-row').style.display = this.value > 1 ? 'block' : 'none'">
+    <div id="pp-partition-row" style="display:none">
+      <label>PP Layer Partition (comma-separated, must sum to total layers)</label>
+      <input type="text" id="pp-layer-partition" placeholder="e.g. 14,26">
+    </div>
 
     <label style="display:flex;align-items:center;gap:8px;margin-top:14px;cursor:pointer;color:#e0e0e0">
       <input type="checkbox" id="language-model-only" style="accent-color:#6c8cff"> Language model only (skip image/multimodal processing)
@@ -344,10 +355,13 @@ async function startVllm() {
   const body = {
     model: model,
     gpu_ids: gpuIds,
+    served_model_name: $('served-model-name').value.trim() || null,
     gpu_memory_utilization: parseFloat($('mem-util').value),
     dtype: $('dtype').value,
     model_impl: $('model-impl').value,
     language_model_only: $('language-model-only').checked,
+    pipeline_parallel_size: parseInt($('pp-size').value) || 1,
+    pp_layer_partition: parseInt($('pp-size').value) > 1 ? ($('pp-layer-partition').value.trim() || null) : null,
     enable_tool_use: $('enable-tool-use').checked,
     tool_call_parser: $('enable-tool-use').checked ? ($('tool-call-parser').value || null) : null,
     extra_args: $('extra-args').value.trim(),
@@ -427,6 +441,7 @@ async function pollStatus() {
               ${apiUrl ? `<span><span class="inst-label">API:</span> ${apiUrl}</span>` : ''}
               <span><span class="inst-label">dtype:</span> ${s.dtype || 'auto'}</span>
               <span><span class="inst-label">TP:</span> ${s.tensor_parallel_size || '?'}</span>
+              ${s.pipeline_parallel_size > 1 ? `<span><span class="inst-label">PP:</span> ${s.pipeline_parallel_size}${s.pp_layer_partition ? ' [' + s.pp_layer_partition + ']' : ''}</span>` : ''}
               <span><span class="inst-label">VRAM:</span> ${s.gpu_memory_utilization ? (s.gpu_memory_utilization * 100).toFixed(0) + '%' : '?'}</span>
               ${s.max_model_len ? `<span><span class="inst-label">max_len:</span> ${s.max_model_len}</span>` : ''}
               ${s.pid ? `<span><span class="inst-label">PID:</span> ${s.pid}</span>` : ''}

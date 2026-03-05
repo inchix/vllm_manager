@@ -141,7 +141,10 @@ class StartRequest(BaseModel):
     max_model_len: Optional[int] = None
     dtype: str = "auto"
     model_impl: str = "auto"
+    served_model_name: Optional[str] = None
     language_model_only: bool = False
+    pipeline_parallel_size: int = 1
+    pp_layer_partition: Optional[str] = None
     enable_tool_use: bool = False
     tool_call_parser: Optional[str] = None
     extra_args: str = ""
@@ -156,6 +159,21 @@ async def api_start(req: StartRequest):
         return JSONResponse(status_code=400, content={"error": f"Invalid dtype: {req.dtype}"})
     if req.model_impl not in ALLOWED_MODEL_IMPLS:
         return JSONResponse(status_code=400, content={"error": f"Invalid model_impl: {req.model_impl}"})
+    if req.pipeline_parallel_size > len(req.gpu_ids):
+        return JSONResponse(status_code=400, content={"error": "Pipeline parallel size cannot exceed number of GPUs"})
+    if len(req.gpu_ids) % req.pipeline_parallel_size != 0:
+        return JSONResponse(status_code=400, content={
+            "error": f"Number of GPUs ({len(req.gpu_ids)}) must be divisible by pipeline parallel size ({req.pipeline_parallel_size})"
+        })
+    if req.pp_layer_partition:
+        try:
+            parts = [int(x) for x in req.pp_layer_partition.split(",")]
+            if len(parts) != req.pipeline_parallel_size:
+                return JSONResponse(status_code=400, content={
+                    "error": f"PP layer partition has {len(parts)} values but pipeline_parallel_size is {req.pipeline_parallel_size}"
+                })
+        except ValueError:
+            return JSONResponse(status_code=400, content={"error": "PP layer partition must be comma-separated integers (e.g. 14,26)"})
     if req.tool_call_parser and req.tool_call_parser not in ALLOWED_TOOL_PARSERS:
         return JSONResponse(status_code=400, content={"error": f"Invalid tool_call_parser: {req.tool_call_parser}"})
     model_path = _safe_model_path(req.model)
@@ -192,16 +210,32 @@ async def api_start(req: StartRequest):
             _available_ports.sort()
             return JSONResponse(status_code=400, content={"error": f"Invalid extra args: {e}"})
 
+    # Sort GPUs by total memory descending (largest first)
+    gpu_mem = {}
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        for gid in req.gpu_ids:
+            h = pynvml.nvmlDeviceGetHandleByIndex(gid)
+            gpu_mem[gid] = pynvml.nvmlDeviceGetMemoryInfo(h).total
+        pynvml.nvmlShutdown()
+    except Exception:
+        pass
+    sorted_gpu_ids = sorted(req.gpu_ids, key=lambda g: gpu_mem.get(g, 0), reverse=True)
+
     config = VllmConfig(
         model=str(model_path),
-        gpu_ids=req.gpu_ids,
-        tensor_parallel_size=len(req.gpu_ids),
+        gpu_ids=sorted_gpu_ids,
+        tensor_parallel_size=len(req.gpu_ids) // req.pipeline_parallel_size,
         port=port,
         gpu_memory_utilization=req.gpu_memory_utilization,
         max_model_len=req.max_model_len,
         dtype=req.dtype,
         model_impl=req.model_impl,
+        served_model_name=req.served_model_name or None,
         language_model_only=req.language_model_only,
+        pipeline_parallel_size=req.pipeline_parallel_size,
+        pp_layer_partition=req.pp_layer_partition or None,
         enable_tool_use=req.enable_tool_use,
         tool_call_parser=req.tool_call_parser,
         extra_args=extra_args,

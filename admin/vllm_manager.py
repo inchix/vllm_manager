@@ -30,6 +30,9 @@ class VllmConfig:
     dtype: str = "auto"
     model_impl: str = "auto"
     language_model_only: bool = False
+    served_model_name: Optional[str] = None
+    pipeline_parallel_size: int = 1
+    pp_layer_partition: Optional[str] = None
     enable_tool_use: bool = False
     tool_call_parser: Optional[str] = None
     extra_args: list[str] = field(default_factory=list)
@@ -59,6 +62,8 @@ class VllmManager:
             cmd.append("--enable-auto-tool-choice")
             if config.tool_call_parser:
                 cmd.extend(["--tool-call-parser", config.tool_call_parser])
+        if config.pipeline_parallel_size > 1:
+            cmd.extend(["--pipeline-parallel-size", str(config.pipeline_parallel_size)])
         cmd.extend([
             "--tensor-parallel-size", str(config.tensor_parallel_size),
             "--gpu-memory-utilization", str(config.gpu_memory_utilization),
@@ -67,6 +72,8 @@ class VllmManager:
             "--port", str(config.port),
             "--model-impl", config.model_impl,
         ])
+        if config.served_model_name:
+            cmd.extend(["--served-model-name", config.served_model_name])
         if config.max_model_len is not None:
             cmd.extend(["--max-model-len", str(config.max_model_len)])
         if config.extra_args:
@@ -77,6 +84,8 @@ class VllmManager:
         env = os.environ.copy()
         env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in config.gpu_ids)
+        if config.pp_layer_partition:
+            env["VLLM_PP_LAYER_PARTITION"] = config.pp_layer_partition
         return env
 
     async def start(self, config: VllmConfig) -> None:
@@ -190,6 +199,8 @@ class VllmManager:
             "max_model_len": self.config.max_model_len if self.config else None,
             "tensor_parallel_size": self.config.tensor_parallel_size if self.config else None,
             "model_impl": self.config.model_impl if self.config else None,
+            "pipeline_parallel_size": self.config.pipeline_parallel_size if self.config else 1,
+            "pp_layer_partition": self.config.pp_layer_partition if self.config else None,
             "enable_tool_use": self.config.enable_tool_use if self.config else False,
             "tool_call_parser": self.config.tool_call_parser if self.config else None,
             "cmd": " ".join(self._cmd) if self._cmd else None,
