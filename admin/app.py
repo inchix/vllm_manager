@@ -390,7 +390,7 @@ async def api_chat(req: ChatRequest):
         return JSONResponse(status_code=409, content={"error": f"Instance is {mgr.state.value}, not running"})
 
     port = mgr.config.port
-    model = mgr.config.model
+    model = mgr.config.served_model_name or mgr.config.model
 
     payload = {
         "model": model,
