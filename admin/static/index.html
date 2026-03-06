@@ -119,7 +119,7 @@
   <div class="card">
     <h2>Launch New Instance</h2>
     <label style="margin-top:0">Model</label>
-    <select id="model-select"><option>Loading...</option></select>
+    <select id="model-select" onchange="updatePpPartition()"><option>Loading...</option></select>
     <div style="display:flex;gap:8px;margin-top:6px">
       <button class="btn-refresh" onclick="loadModels()">Refresh Models</button>
       <button class="btn-stop" onclick="deleteModel()">Delete Model</button>
@@ -153,10 +153,11 @@
 
     <label>Pipeline Parallel Size (default 1 = off)</label>
     <input type="number" id="pp-size" value="1" min="1" max="8"
-           onchange="$('pp-partition-row').style.display = this.value > 1 ? 'block' : 'none'">
+           onchange="onPpChanged()">
     <div id="pp-partition-row" style="display:none">
-      <label>PP Layer Partition (comma-separated, must sum to total layers)</label>
-      <input type="text" id="pp-layer-partition" placeholder="e.g. 14,26">
+      <label>PP Layer Partition <span id="pp-layers-info" style="color:#888;font-weight:normal"></span></label>
+      <input type="text" id="pp-layer-partition" placeholder="auto-computed from GPU memory">
+      <div style="color:#888;font-size:12px;margin-top:2px">Leave blank to auto-distribute layers by GPU memory</div>
     </div>
 
     <label style="display:flex;align-items:center;gap:8px;margin-top:14px;cursor:pointer;color:#e0e0e0">
@@ -290,7 +291,7 @@ function renderGpus() {
     const usedLabel = g.used_by ? `<span class="gpu-used">(${g.used_by})</span>` : '';
     return `
       <label class="${cls}">
-        <input type="checkbox" value="${g.index}" data-cc="${g.compute_capability}" ${disabled}>
+        <input type="checkbox" value="${g.index}" data-cc="${g.compute_capability}" ${disabled} onchange="updatePpPartition()">
         <span class="gpu-name">GPU ${g.index}: ${g.name}</span>
         ${usedLabel}
         <span class="gpu-cc">CC ${g.compute_capability}</span>
@@ -341,8 +342,71 @@ async function loadModels() {
     } else {
       sel.innerHTML = models.map(m => `<option value="${m}">${m}</option>`).join('');
     }
+    updatePpPartition();
   } catch (e) {
     $('model-select').innerHTML = '<option value="">Failed to load</option>';
+  }
+}
+
+// Cache model layer counts
+const modelLayerCache = {};
+
+async function getModelLayers(modelName) {
+  if (!modelName) return null;
+  if (modelLayerCache[modelName] !== undefined) return modelLayerCache[modelName];
+  try {
+    const res = await fetch(`/api/model-info/${encodeURIComponent(modelName)}`);
+    const data = await res.json();
+    modelLayerCache[modelName] = data.num_hidden_layers || null;
+    return modelLayerCache[modelName];
+  } catch (e) {
+    return null;
+  }
+}
+
+function onPpChanged() {
+  const ppSize = parseInt($('pp-size').value) || 1;
+  $('pp-partition-row').style.display = ppSize > 1 ? 'block' : 'none';
+  if (ppSize > 1) updatePpPartition();
+}
+
+async function updatePpPartition() {
+  const ppSize = parseInt($('pp-size').value) || 1;
+  if (ppSize <= 1) return;
+
+  const model = $('model-select').value;
+  const numLayers = await getModelLayers(model);
+  const info = $('pp-layers-info');
+
+  if (numLayers) {
+    info.textContent = `(model has ${numLayers} layers)`;
+
+    // Get selected GPUs and their memory
+    const gpuIds = [...document.querySelectorAll('#gpu-list input:checked')].map(cb => parseInt(cb.value));
+    if (gpuIds.length >= ppSize) {
+      // Sort by memory descending (same as backend)
+      const gpusSorted = gpuIds.map(id => {
+        const g = gpuData.find(x => x.index === id);
+        return { id, mem: g ? g.memory_total_mb : 0 };
+      }).sort((a, b) => b.mem - a.mem);
+
+      const totalMem = gpusSorted.reduce((s, g) => s + g.mem, 0);
+      if (totalMem > 0) {
+        // Distribute proportionally
+        const raw = gpusSorted.map(g => g.mem / totalMem * numLayers);
+        const parts = raw.map(r => Math.floor(r));
+        let remainder = numLayers - parts.reduce((s, p) => s + p, 0);
+        const fracs = raw.map((r, i) => ({ frac: r - parts[i], i })).sort((a, b) => b.frac - a.frac);
+        for (let j = 0; j < remainder; j++) parts[fracs[j].i]++;
+
+        $('pp-layer-partition').placeholder = parts.join(',') + ' (auto)';
+      }
+    } else {
+      $('pp-layer-partition').placeholder = `select ${ppSize} GPUs for auto-partition`;
+    }
+  } else {
+    info.textContent = '';
+    $('pp-layer-partition').placeholder = 'e.g. 14,26';
   }
 }
 

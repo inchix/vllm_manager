@@ -51,12 +51,29 @@ class VllmManager:
     _health_task: Optional[asyncio.Task] = None
     _on_exit: Optional[Callable] = None
 
+    def _get_vllm_version(self) -> tuple[int, ...]:
+        """Return vLLM version as tuple, e.g. (0, 11, 2) or (0, 16, 0)."""
+        try:
+            from importlib.metadata import version as pkg_version
+            ver = pkg_version("vllm").split("+")[0].replace("rc", ".").replace("dev", ".")
+            parts = []
+            for p in ver.split("."):
+                try:
+                    parts.append(int(p))
+                except ValueError:
+                    break
+            return tuple(parts) if parts else (0, 0, 0)
+        except Exception:
+            return (0, 0, 0)
+
     def _build_cmd(self, config: VllmConfig) -> list[str]:
+        ver = self._get_vllm_version()
+
         cmd = [
             "python3", "-m", "vllm.entrypoints.openai.api_server",
             "--model", config.model,
         ]
-        if config.language_model_only:
+        if config.language_model_only and ver >= (0, 16, 0):
             cmd.append("--language-model-only")
         if config.enable_tool_use:
             cmd.append("--enable-auto-tool-choice")
@@ -64,14 +81,19 @@ class VllmManager:
                 cmd.extend(["--tool-call-parser", config.tool_call_parser])
         if config.pipeline_parallel_size > 1:
             cmd.extend(["--pipeline-parallel-size", str(config.pipeline_parallel_size)])
+        # Use ray backend for multi-GPU to avoid V1 MultiprocExecutor bugs
+        if config.tensor_parallel_size > 1 or config.pipeline_parallel_size > 1:
+            cmd.extend(["--distributed-executor-backend", "ray"])
         cmd.extend([
             "--tensor-parallel-size", str(config.tensor_parallel_size),
             "--gpu-memory-utilization", str(config.gpu_memory_utilization),
             "--dtype", config.dtype,
             "--host", "0.0.0.0",
             "--port", str(config.port),
-            "--model-impl", config.model_impl,
         ])
+        # --model-impl added in v0.12+
+        if ver >= (0, 12, 0):
+            cmd.extend(["--model-impl", config.model_impl])
         if config.served_model_name:
             cmd.extend(["--served-model-name", config.served_model_name])
         if config.max_model_len is not None:

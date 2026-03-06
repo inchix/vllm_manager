@@ -1,4 +1,5 @@
 import asyncio
+import json as json_mod
 import logging
 import os
 import shlex
@@ -126,6 +127,71 @@ def api_models():
     return list_models()
 
 
+def _get_num_hidden_layers(model_name: str) -> Optional[int]:
+    """Read num_hidden_layers from a model's config.json."""
+    model_path = _safe_model_path(model_name)
+    if not model_path:
+        return None
+    config_file = model_path / "config.json"
+    if not config_file.exists():
+        return None
+    try:
+        with open(config_file) as f:
+            config = json_mod.load(f)
+        return config.get("num_hidden_layers")
+    except Exception:
+        return None
+
+
+def _compute_pp_partition(num_layers: int, gpu_ids: list[int]) -> str:
+    """Compute PP layer partition proportional to GPU memory."""
+    pp_size = len(gpu_ids)
+    gpu_mem = {}
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        for gid in gpu_ids:
+            h = pynvml.nvmlDeviceGetHandleByIndex(gid)
+            gpu_mem[gid] = pynvml.nvmlDeviceGetMemoryInfo(h).total
+        pynvml.nvmlShutdown()
+    except Exception:
+        pass
+
+    if not gpu_mem:
+        # Equal split if we can't read GPU memory
+        base = num_layers // pp_size
+        remainder = num_layers % pp_size
+        parts = [base + (1 if i < remainder else 0) for i in range(pp_size)]
+        return ",".join(str(p) for p in parts)
+
+    total_mem = sum(gpu_mem.get(gid, 0) for gid in gpu_ids)
+    if total_mem == 0:
+        parts = [num_layers // pp_size] * pp_size
+        parts[0] += num_layers - sum(parts)
+        return ",".join(str(p) for p in parts)
+
+    # Distribute layers proportionally to memory
+    raw = [gpu_mem.get(gid, 0) / total_mem * num_layers for gid in gpu_ids]
+    parts = [int(r) for r in raw]
+    # Distribute remaining layers to GPUs with largest fractional parts
+    remainder = num_layers - sum(parts)
+    fracs = [(raw[i] - parts[i], i) for i in range(pp_size)]
+    fracs.sort(reverse=True)
+    for j in range(remainder):
+        parts[fracs[j][1]] += 1
+
+    return ",".join(str(p) for p in parts)
+
+
+@app.get("/api/model-info/{model_name}")
+def api_model_info(model_name: str):
+    model_path = _safe_model_path(model_name)
+    if not model_path or not model_path.is_dir():
+        return JSONResponse(status_code=404, content={"error": "Model not found"})
+    num_layers = _get_num_hidden_layers(model_name)
+    return {"model": model_name, "num_hidden_layers": num_layers}
+
+
 @app.get("/api/status")
 def api_status():
     instances = []
@@ -171,6 +237,11 @@ async def api_start(req: StartRequest):
             if len(parts) != req.pipeline_parallel_size:
                 return JSONResponse(status_code=400, content={
                     "error": f"PP layer partition has {len(parts)} values but pipeline_parallel_size is {req.pipeline_parallel_size}"
+                })
+            num_layers = _get_num_hidden_layers(req.model)
+            if num_layers and sum(parts) != num_layers:
+                return JSONResponse(status_code=400, content={
+                    "error": f"PP layer partition sums to {sum(parts)} but model has {num_layers} layers"
                 })
         except ValueError:
             return JSONResponse(status_code=400, content={"error": "PP layer partition must be comma-separated integers (e.g. 14,26)"})
@@ -223,6 +294,14 @@ async def api_start(req: StartRequest):
         pass
     sorted_gpu_ids = sorted(req.gpu_ids, key=lambda g: gpu_mem.get(g, 0), reverse=True)
 
+    # Auto-compute PP layer partition if PP > 1 and not specified
+    pp_layer_partition = req.pp_layer_partition or None
+    if req.pipeline_parallel_size > 1 and not pp_layer_partition:
+        num_layers = _get_num_hidden_layers(req.model)
+        if num_layers:
+            pp_layer_partition = _compute_pp_partition(num_layers, sorted_gpu_ids)
+            logger.info("Auto-computed PP layer partition: %s (model has %d layers)", pp_layer_partition, num_layers)
+
     config = VllmConfig(
         model=str(model_path),
         gpu_ids=sorted_gpu_ids,
@@ -235,7 +314,7 @@ async def api_start(req: StartRequest):
         served_model_name=req.served_model_name or None,
         language_model_only=req.language_model_only,
         pipeline_parallel_size=req.pipeline_parallel_size,
-        pp_layer_partition=req.pp_layer_partition or None,
+        pp_layer_partition=pp_layer_partition,
         enable_tool_use=req.enable_tool_use,
         tool_call_parser=req.tool_call_parser,
         extra_args=extra_args,
