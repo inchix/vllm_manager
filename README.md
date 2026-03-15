@@ -1,4 +1,4 @@
-# vLLM Manager
+# vLLM Manager - by dracotel.com
 
 Web-based admin UI for running multiple vLLM instances across multiple GPUs. Manages vLLM processes inside a single container with a FastAPI backend and vanilla HTML/JS frontend.
 
