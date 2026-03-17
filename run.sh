@@ -93,6 +93,8 @@ RUN_ARGS=(
   --rm
   --name "$CONTAINER_NAME"
   --security-opt=label=disable
+  --ulimit nofile=65536:65536
+  --pids-limit=-1
   $GPU_ARGS
   --shm-size="$SHM_SIZE"
   --tmpfs "/tmp:rw,size=$TMP_SIZE"
