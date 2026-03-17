@@ -20,13 +20,13 @@
 
 ## UI Improvements
 
-- [ ] Dark/light theme toggle
-- [ ] Log filtering and search
-- [ ] Log download/export
-- [ ] GPU utilization charts over time
-- [ ] Mobile-responsive layout improvements
-- [ ] Toast notifications instead of alert() dialogs
-- [ ] Confirmation dialog before stopping instances
+- [x] Dark/light theme toggle
+- [x] Log filtering and search
+- [x] Log download/export
+- [x] GPU utilization charts over time
+- [x] Mobile-responsive layout improvements
+- [x] Toast notifications instead of alert() dialogs
+- [x] Confirmation dialog before stopping instances
 
 ## Technical Debt
 

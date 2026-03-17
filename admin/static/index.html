@@ -5,104 +5,233 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>vLLM Admin</title>
 <style>
+  :root {
+    --bg-body: #0f1117;
+    --bg-card: #1a1d27;
+    --bg-input: #22252f;
+    --bg-code: #181a22;
+    --bg-logs: #0a0c10;
+    --border-card: #2a2d37;
+    --border-input: #333;
+    --text-primary: #e0e0e0;
+    --text-heading: #fff;
+    --text-secondary: #888;
+    --text-muted: #666;
+    --text-subheading: #a0a8c0;
+    --accent: #6c8cff;
+    --warning-bg: #3b2e00;
+    --warning-border: #ffb300;
+    --warning-text: #ffd54f;
+    --green: #2e7d32;
+    --green-hover: #388e3c;
+    --green-disabled: #1b3d1e;
+    --red: #c62828;
+    --red-hover: #d32f2f;
+    --btn-neutral: #333;
+    --btn-neutral-hover: #444;
+    --btn-neutral-text: #ccc;
+    --dl-blue: #1565c0;
+    --dl-blue-hover: #1976d2;
+    --dl-blue-disabled-bg: #1a2a40;
+    --gpu-hover: #2a2d3a;
+    --chat-tool-bg: #1a2a1a;
+    --chat-tool-border: #2e7d32;
+    --log-text: #aaa;
+    --overlay-bg: rgba(0,0,0,0.6);
+    --mark-bg: rgba(108,140,255,0.25);
+  }
+
+  body.light-theme {
+    --bg-body: #f5f6fa;
+    --bg-card: #ffffff;
+    --bg-input: #f0f1f5;
+    --bg-code: #e8eaf0;
+    --bg-logs: #fafbfc;
+    --border-card: #ddd;
+    --border-input: #ccc;
+    --text-primary: #222;
+    --text-heading: #111;
+    --text-secondary: #666;
+    --text-muted: #999;
+    --text-subheading: #555;
+    --accent: #4a6adf;
+    --warning-bg: #fff8e1;
+    --warning-border: #ff9800;
+    --warning-text: #e65100;
+    --green: #388e3c;
+    --green-hover: #43a047;
+    --green-disabled: #c8e6c9;
+    --red: #d32f2f;
+    --red-hover: #e53935;
+    --btn-neutral: #e0e0e0;
+    --btn-neutral-hover: #d0d0d0;
+    --btn-neutral-text: #333;
+    --dl-blue: #1976d2;
+    --dl-blue-hover: #1e88e5;
+    --dl-blue-disabled-bg: #e3f2fd;
+    --gpu-hover: #e8eaf0;
+    --chat-tool-bg: #e8f5e9;
+    --chat-tool-border: #4caf50;
+    --log-text: #444;
+    --overlay-bg: rgba(0,0,0,0.4);
+    --mark-bg: rgba(74,106,223,0.2);
+  }
+
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f1117; color: #e0e0e0; padding: 20px; }
-  h1 { font-size: 1.5rem; margin-bottom: 20px; color: #fff; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg-body); color: var(--text-primary); padding: 20px; }
+  h1 { font-size: 1.5rem; color: var(--text-heading); }
+  .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; max-width: 1200px; margin-left: auto; margin-right: auto; }
+  .theme-toggle { background: var(--btn-neutral); color: var(--btn-neutral-text); border: none; border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 0.85rem; transition: background 0.15s; }
+  .theme-toggle:hover { background: var(--btn-neutral-hover); }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 1200px; margin: 0 auto; }
-  .card { background: #1a1d27; border: 1px solid #2a2d37; border-radius: 8px; padding: 20px; }
-  .card h2 { font-size: 1.1rem; margin-bottom: 12px; color: #a0a8c0; }
+  .card { background: var(--bg-card); border: 1px solid var(--border-card); border-radius: 8px; padding: 20px; }
+  .card h2 { font-size: 1.1rem; margin-bottom: 12px; color: var(--text-subheading); }
   .full-width { grid-column: 1 / -1; }
 
   /* Warning banner */
-  .warning { background: #3b2e00; border: 1px solid #ffb300; color: #ffd54f; padding: 10px 14px; border-radius: 6px; margin-bottom: 12px; display: none; font-size: 0.9rem; }
+  .warning { background: var(--warning-bg); border: 1px solid var(--warning-border); color: var(--warning-text); padding: 10px 14px; border-radius: 6px; margin-bottom: 12px; display: none; font-size: 0.9rem; }
 
   /* GPU checkboxes */
   .gpu-list { display: flex; flex-direction: column; gap: 8px; }
-  .gpu-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: #22252f; border-radius: 6px; cursor: pointer; }
-  .gpu-item:hover { background: #2a2d3a; }
+  .gpu-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--bg-input); border-radius: 6px; cursor: pointer; }
+  .gpu-item:hover { background: var(--gpu-hover); }
   .gpu-item.in-use { opacity: 0.5; cursor: not-allowed; }
-  .gpu-item input { accent-color: #6c8cff; }
+  .gpu-item input { accent-color: var(--accent); }
   .gpu-name { font-weight: 500; }
-  .gpu-mem { color: #888; font-size: 0.85rem; margin-left: auto; }
-  .gpu-cc { color: #666; font-size: 0.8rem; }
-  .gpu-used { color: #ffb300; font-size: 0.75rem; }
+  .gpu-mem { color: var(--text-secondary); font-size: 0.85rem; margin-left: auto; }
+  .gpu-cc { color: var(--text-muted); font-size: 0.8rem; }
+  .gpu-used { color: var(--warning-border); font-size: 0.75rem; }
 
   /* Form controls */
-  label { display: block; font-size: 0.85rem; color: #888; margin-bottom: 4px; margin-top: 12px; }
-  select, input[type="number"] { width: 100%; padding: 8px; background: #22252f; border: 1px solid #333; color: #e0e0e0; border-radius: 4px; font-size: 0.9rem; }
+  label { display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 4px; margin-top: 12px; }
+  select, input[type="number"] { width: 100%; padding: 8px; background: var(--bg-input); border: 1px solid var(--border-input); color: var(--text-primary); border-radius: 4px; font-size: 0.9rem; }
   select:first-of-type, label:first-of-type { margin-top: 0; }
 
   .slider-row { display: flex; align-items: center; gap: 10px; }
-  .slider-row input[type="range"] { flex: 1; accent-color: #6c8cff; }
+  .slider-row input[type="range"] { flex: 1; accent-color: var(--accent); }
   .slider-val { font-size: 0.9rem; min-width: 40px; }
 
   /* Download */
-  input[type="text"] { width: 100%; padding: 8px; background: #22252f; border: 1px solid #333; color: #e0e0e0; border-radius: 4px; font-size: 0.9rem; }
+  input[type="text"] { width: 100%; padding: 8px; background: var(--bg-input); border: 1px solid var(--border-input); color: var(--text-primary); border-radius: 4px; font-size: 0.9rem; }
   .dl-status { font-size: 0.85rem; margin-top: 8px; min-height: 1.2em; }
-  .dl-status.downloading { color: #ffb300; }
+  .dl-status.downloading { color: var(--warning-border); }
   .dl-status.complete { color: #4caf50; }
   .dl-status.error { color: #f44336; }
-  .btn-download { background: #1565c0; color: #fff; margin-top: 8px; }
-  .btn-download:hover { background: #1976d2; }
-  .btn-download:disabled { background: #1a2a40; color: #666; cursor: not-allowed; }
+  .btn-download { background: var(--dl-blue); color: #fff; margin-top: 8px; }
+  .btn-download:hover { background: var(--dl-blue-hover); }
+  .btn-download:disabled { background: var(--dl-blue-disabled-bg); color: var(--text-muted); cursor: not-allowed; }
   .progress-wrap { margin-top: 10px; display: none; }
-  .progress-bar { background: #22252f; border-radius: 4px; height: 20px; overflow: hidden; }
-  .progress-fill { height: 100%; background: #1565c0; transition: width 0.3s ease; border-radius: 4px; }
-  .progress-text { font-size: 0.82rem; color: #aaa; margin-top: 4px; }
+  .progress-bar { background: var(--bg-input); border-radius: 4px; height: 20px; overflow: hidden; }
+  .progress-fill { height: 100%; background: var(--dl-blue); transition: width 0.3s ease; border-radius: 4px; }
+  .progress-text { font-size: 0.82rem; color: var(--log-text); margin-top: 4px; }
 
   /* Buttons */
   .btn-row { display: flex; gap: 10px; margin-top: 16px; }
   button { padding: 10px 24px; border: none; border-radius: 6px; font-size: 0.9rem; font-weight: 500; cursor: pointer; transition: background 0.15s; }
-  .btn-start { background: #2e7d32; color: #fff; }
-  .btn-start:hover { background: #388e3c; }
-  .btn-start:disabled { background: #1b3d1e; color: #666; cursor: not-allowed; }
-  .btn-stop { background: #c62828; color: #fff; padding: 6px 14px; font-size: 0.8rem; }
-  .btn-stop:hover { background: #d32f2f; }
-  .btn-refresh { background: #333; color: #ccc; padding: 6px 14px; font-size: 0.8rem; }
-  .btn-refresh:hover { background: #444; }
+  .btn-start { background: var(--green); color: #fff; }
+  .btn-start:hover { background: var(--green-hover); }
+  .btn-start:disabled { background: var(--green-disabled); color: var(--text-muted); cursor: not-allowed; }
+  .btn-stop { background: var(--red); color: #fff; padding: 6px 14px; font-size: 0.8rem; }
+  .btn-stop:hover { background: var(--red-hover); }
+  .btn-refresh { background: var(--btn-neutral); color: var(--btn-neutral-text); padding: 6px 14px; font-size: 0.8rem; }
+  .btn-refresh:hover { background: var(--btn-neutral-hover); }
 
   /* Instances table */
   .instance-list { display: flex; flex-direction: column; gap: 8px; }
-  .instance-row { display: flex; flex-direction: column; gap: 6px; padding: 10px 14px; background: #22252f; border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
-  .instance-row:hover { background: #2a2d3a; }
-  .instance-row.selected { border: 1px solid #6c8cff; }
+  .instance-row { display: flex; flex-direction: column; gap: 6px; padding: 10px 14px; background: var(--bg-input); border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
+  .instance-row:hover { background: var(--gpu-hover); }
+  .instance-row.selected { border: 1px solid var(--accent); }
   .instance-header { display: flex; align-items: center; gap: 12px; }
-  .cmd-line { font-family: "Fira Code", "Cascadia Code", monospace; font-size: 0.75rem; color: #888; background: #181a22; padding: 6px 8px; border-radius: 4px; word-break: break-all; white-space: pre-wrap; }
-  .cmd-line .cmd-label { color: #6c8cff; }
+  .cmd-line { font-family: "Fira Code", "Cascadia Code", monospace; font-size: 0.75rem; color: var(--text-secondary); background: var(--bg-code); padding: 6px 8px; border-radius: 4px; word-break: break-all; white-space: pre-wrap; }
+  .cmd-line .cmd-label { color: var(--accent); }
   .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-  .dot-stopped { background: #666; }
-  .dot-starting { background: #ffb300; animation: pulse 1s infinite; }
+  .dot-stopped { background: var(--text-muted); }
+  .dot-starting { background: var(--warning-border); animation: pulse 1s infinite; }
   .dot-running { background: #4caf50; }
   .dot-error { background: #f44336; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
   .inst-info { flex: 1; display: flex; flex-wrap: wrap; gap: 4px 16px; }
   .inst-info span { white-space: nowrap; }
-  .inst-label { color: #888; }
-  .no-instances { color: #666; font-size: 0.9rem; padding: 10px; }
+  .inst-label { color: var(--text-secondary); }
+  .no-instances { color: var(--text-muted); font-size: 0.9rem; padding: 10px; }
 
   /* Logs */
-  .logs { background: #0a0c10; border: 1px solid #222; border-radius: 4px; padding: 10px; font-family: "Fira Code", "Cascadia Code", monospace; font-size: 0.78rem; max-height: 350px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; color: #aaa; margin-top: 12px; line-height: 1.4; }
+  .log-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  .log-toolbar input[type="text"] { flex: 1; min-width: 150px; padding: 6px 8px; font-size: 0.82rem; }
+  .log-toolbar button { padding: 6px 12px; font-size: 0.8rem; }
+  .logs { background: var(--bg-logs); border: 1px solid var(--border-input); border-radius: 4px; padding: 10px; font-family: "Fira Code", "Cascadia Code", monospace; font-size: 0.78rem; max-height: 350px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; color: var(--log-text); margin-top: 0; line-height: 1.4; }
+  mark { background: var(--mark-bg); color: var(--accent); border-radius: 2px; }
+
+  /* GPU Charts */
+  .gpu-charts-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+  .gpu-chart-card { background: var(--bg-input); border-radius: 6px; padding: 12px; }
+  .gpu-chart-card h3 { font-size: 0.85rem; color: var(--text-subheading); margin-bottom: 8px; }
+  .gpu-chart-label { font-size: 0.78rem; color: var(--text-secondary); margin-top: 4px; }
+  .gpu-chart-card canvas { width: 100%; height: 60px; display: block; border-radius: 4px; }
 
   /* Chat test */
-  .chat-messages { background: #0a0c10; border: 1px solid #222; border-radius: 4px; padding: 10px; max-height: 400px; overflow-y: auto; margin-bottom: 12px; min-height: 100px; }
+  .chat-messages { background: var(--bg-logs); border: 1px solid var(--border-input); border-radius: 4px; padding: 10px; max-height: 400px; overflow-y: auto; margin-bottom: 12px; min-height: 100px; }
   .chat-msg { margin-bottom: 10px; font-size: 0.88rem; line-height: 1.5; }
   .chat-msg .chat-role { font-weight: 600; margin-bottom: 2px; }
-  .chat-role-user { color: #6c8cff; }
+  .chat-role-user { color: var(--accent); }
   .chat-role-assistant { color: #4caf50; }
-  .chat-role-tool { color: #ffb300; }
-  .chat-tool-call { background: #1a2a1a; border: 1px solid #2e7d32; border-radius: 4px; padding: 8px; margin: 4px 0; font-family: monospace; font-size: 0.82rem; white-space: pre-wrap; word-break: break-all; }
+  .chat-role-tool { color: var(--warning-border); }
+  .chat-tool-call { background: var(--chat-tool-bg); border: 1px solid var(--chat-tool-border); border-radius: 4px; padding: 8px; margin: 4px 0; font-family: monospace; font-size: 0.82rem; white-space: pre-wrap; word-break: break-all; }
   .chat-input-row { display: flex; gap: 10px; }
   .chat-input-row input[type="text"] { flex: 1; }
   .chat-input-row button { flex-shrink: 0; }
-  textarea { width: 100%; padding: 8px; background: #22252f; border: 1px solid #333; color: #e0e0e0; border-radius: 4px; font-family: monospace; font-size: 0.82rem; resize: vertical; min-height: 60px; }
+  textarea { width: 100%; padding: 8px; background: var(--bg-input); border: 1px solid var(--border-input); color: var(--text-primary); border-radius: 4px; font-family: monospace; font-size: 0.82rem; resize: vertical; min-height: 60px; }
   .chat-controls { display: flex; gap: 10px; align-items: end; margin-bottom: 12px; flex-wrap: wrap; }
   .chat-controls > div { min-width: 150px; }
   .tool-result-row { display: flex; gap: 8px; align-items: start; margin-top: 8px; }
   .tool-result-row textarea { flex: 1; min-height: 40px; }
+
+  /* Toast notifications */
+  .toast-container { position: fixed; bottom: 20px; right: 20px; z-index: 1000; display: flex; flex-direction: column-reverse; gap: 8px; max-width: 420px; pointer-events: none; }
+  .toast { padding: 12px 16px; border-radius: 6px; font-size: 0.88rem; color: #fff; display: flex; align-items: flex-start; gap: 8px; cursor: pointer; pointer-events: auto; animation: toast-in 0.3s ease; word-break: break-word; }
+  .toast-error { background: #c62828; }
+  .toast-warning { background: #e65100; }
+  .toast-success { background: #2e7d32; }
+  .toast-info { background: #1565c0; }
+  @keyframes toast-in { from { opacity: 0; transform: translateX(40px); } to { opacity: 1; transform: translateX(0); } }
+  @keyframes toast-out { from { opacity: 1; transform: translateX(0); } to { opacity: 0; transform: translateX(40px); } }
+
+  /* Confirmation modal */
+  .modal-overlay { display: none; position: fixed; inset: 0; background: var(--overlay-bg); z-index: 2000; align-items: center; justify-content: center; }
+  .modal-overlay.active { display: flex; }
+  .modal { background: var(--bg-card); border: 1px solid var(--border-card); border-radius: 8px; padding: 24px; max-width: 420px; width: 90%; }
+  .modal-title { font-size: 1.1rem; font-weight: 600; margin-bottom: 12px; color: var(--text-heading); }
+  .modal-body { font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 20px; }
+  .modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+
+  /* Mobile responsive */
+  @media (max-width: 768px) {
+    body { padding: 10px; }
+    .grid { grid-template-columns: 1fr; gap: 12px; }
+    .page-header { margin-bottom: 12px; }
+    h1 { font-size: 1.2rem; }
+    .chat-controls { flex-direction: column; }
+    .chat-controls > div { min-width: 100%; }
+    .chat-input-row { flex-direction: column; }
+    .chat-input-row button { width: 100%; }
+    .btn-row { flex-direction: column; }
+    .btn-row button { width: 100%; }
+    .instance-header { flex-wrap: wrap; }
+    .inst-info { gap: 2px 10px; }
+    .gpu-mem { margin-left: 0; font-size: 0.78rem; }
+    .gpu-item { flex-wrap: wrap; }
+    .toast-container { left: 10px; right: 10px; max-width: none; }
+    .log-toolbar { flex-direction: column; }
+    .log-toolbar input[type="text"] { width: 100%; }
+    .gpu-charts-grid { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
-<h1>vLLM Multi-GPU Admin</h1>
+<div class="page-header">
+  <h1>vLLM Multi-GPU Admin</h1>
+  <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()">Light Mode</button>
+</div>
 <div class="grid">
 
   <!-- GPU Selection -->
@@ -155,17 +284,17 @@
     <input type="number" id="pp-size" value="1" min="1" max="8"
            onchange="onPpChanged()">
     <div id="pp-partition-row" style="display:none">
-      <label>PP Layer Partition <span id="pp-layers-info" style="color:#888;font-weight:normal"></span></label>
+      <label>PP Layer Partition <span id="pp-layers-info" style="font-weight:normal"></span></label>
       <input type="text" id="pp-layer-partition" placeholder="auto-computed from GPU memory">
-      <div style="color:#888;font-size:12px;margin-top:2px">Leave blank to auto-distribute layers by GPU memory</div>
+      <div style="font-size:12px;margin-top:2px;color:var(--text-secondary)">Leave blank to auto-distribute layers by GPU memory</div>
     </div>
 
-    <label style="display:flex;align-items:center;gap:8px;margin-top:14px;cursor:pointer;color:#e0e0e0">
-      <input type="checkbox" id="language-model-only" style="accent-color:#6c8cff"> Language model only (skip image/multimodal processing)
+    <label style="display:flex;align-items:center;gap:8px;margin-top:14px;cursor:pointer;color:var(--text-primary)">
+      <input type="checkbox" id="language-model-only" style="accent-color:var(--accent)"> Language model only (skip image/multimodal processing)
     </label>
 
-    <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer;color:#e0e0e0">
-      <input type="checkbox" id="enable-tool-use" style="accent-color:#6c8cff"
+    <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer;color:var(--text-primary)">
+      <input type="checkbox" id="enable-tool-use" style="accent-color:var(--accent)"
              onchange="$('tool-parser-row').style.display = this.checked ? 'block' : 'none'"> Enable tool use (--enable-auto-tool-choice)
     </label>
     <div id="tool-parser-row" style="display:none">
@@ -217,9 +346,20 @@
     </div>
   </div>
 
+  <!-- GPU Utilization Charts -->
+  <div class="card full-width">
+    <h2>GPU Utilization</h2>
+    <div class="gpu-charts-grid" id="gpu-charts"></div>
+  </div>
+
   <!-- Logs for selected instance -->
   <div class="card full-width">
-    <h2>Logs <span id="logs-label" style="font-size:0.85rem;color:#888"></span></h2>
+    <h2>Logs <span id="logs-label" style="font-size:0.85rem;color:var(--text-secondary)"></span></h2>
+    <div class="log-toolbar">
+      <input type="text" id="log-search" placeholder="Filter logs..." oninput="renderLogs()">
+      <button class="btn-refresh" id="log-filter-btn" onclick="toggleLogFilter()">Filter: Off</button>
+      <button class="btn-refresh" onclick="downloadLogs()">Download</button>
+    </div>
     <div class="logs" id="logs"></div>
   </div>
 
@@ -244,11 +384,11 @@
       </div>
     </div>
     <details style="margin-bottom:12px">
-      <summary style="cursor:pointer;color:#a0a8c0;font-size:0.88rem">Tool Definitions (JSON, optional)</summary>
+      <summary style="cursor:pointer;color:var(--text-subheading);font-size:0.88rem">Tool Definitions (JSON, optional)</summary>
       <textarea id="chat-tools" rows="6" placeholder='[{"type":"function","function":{"name":"get_weather","description":"Get current weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}]'></textarea>
     </details>
     <div class="chat-messages" id="chat-messages">
-      <div style="color:#666;font-size:0.85rem">Send a message to start chatting.</div>
+      <div style="color:var(--text-muted);font-size:0.85rem">Send a message to start chatting.</div>
     </div>
     <div id="tool-results"></div>
     <div class="chat-input-row">
@@ -259,17 +399,79 @@
 
 </div>
 
+<!-- Toast container -->
+<div class="toast-container" id="toast-container"></div>
+
+<!-- Confirmation modal -->
+<div class="modal-overlay" id="modal-overlay">
+  <div class="modal">
+    <div class="modal-title" id="modal-title"></div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-actions">
+      <button class="btn-refresh" id="modal-cancel">Cancel</button>
+      <button class="btn-stop" id="modal-confirm">Confirm</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const $ = id => document.getElementById(id);
 
+// --- Theme toggle ---
+function toggleTheme() {
+  document.body.classList.toggle('light-theme');
+  const isLight = document.body.classList.contains('light-theme');
+  $('theme-toggle').textContent = isLight ? 'Dark Mode' : 'Light Mode';
+  localStorage.setItem('theme', isLight ? 'light' : 'dark');
+}
+(function initTheme() {
+  if (localStorage.getItem('theme') === 'light') {
+    document.body.classList.add('light-theme');
+    $('theme-toggle').textContent = 'Dark Mode';
+  }
+})();
+
+// --- Toast notifications ---
+function showToast(msg, type = 'error') {
+  const c = $('toast-container');
+  const t = document.createElement('div');
+  t.className = 'toast toast-' + type;
+  t.textContent = typeof msg === 'string' ? msg : JSON.stringify(msg);
+  t.onclick = () => { t.style.animation = 'toast-out 0.2s ease forwards'; setTimeout(() => t.remove(), 200); };
+  c.appendChild(t);
+  setTimeout(() => { if (t.parentNode) { t.style.animation = 'toast-out 0.2s ease forwards'; setTimeout(() => t.remove(), 200); } }, 5000);
+}
+
+// --- Confirmation modal ---
+function showModal(title, body) {
+  return new Promise(resolve => {
+    $('modal-title').textContent = title;
+    $('modal-body').textContent = body;
+    const overlay = $('modal-overlay');
+    overlay.classList.add('active');
+    $('modal-confirm').onclick = () => { overlay.classList.remove('active'); resolve(true); };
+    $('modal-cancel').onclick = () => { overlay.classList.remove('active'); resolve(false); };
+    overlay.onclick = (e) => { if (e.target === overlay) { overlay.classList.remove('active'); resolve(false); } };
+  });
+}
+
+// --- GPU data ---
 let gpuData = [];
 let selectedLogInstance = null;
+let currentLogs = [];
+let logFilterMode = false;
+
+// GPU utilization history
+const gpuHistory = {};
+const GPU_HISTORY_MAX = 60;
 
 async function loadGpus() {
   try {
     const res = await fetch('/api/gpus');
     gpuData = await res.json();
     renderGpus();
+    updateGpuHistory();
+    renderGpuCharts();
   } catch (e) {
     $('gpu-list').innerHTML = '<div style="color:#f44">Failed to load GPUs</div>';
   }
@@ -314,10 +516,108 @@ function checkMixedArch() {
   }
 }
 
+// --- GPU Utilization Charts ---
+function updateGpuHistory() {
+  const now = Date.now();
+  gpuData.forEach(g => {
+    if (g.error) return;
+    if (!gpuHistory[g.index]) gpuHistory[g.index] = [];
+    const usedMb = g.memory_total_mb - g.memory_free_mb;
+    gpuHistory[g.index].push({ time: now, usedMb, totalMb: g.memory_total_mb });
+    if (gpuHistory[g.index].length > GPU_HISTORY_MAX) gpuHistory[g.index].shift();
+  });
+}
+
+function renderGpuCharts() {
+  const container = $('gpu-charts');
+  if (!gpuData.length || gpuData[0].error) {
+    container.innerHTML = '<div style="color:var(--text-muted);font-size:0.85rem">No GPU data</div>';
+    return;
+  }
+  // Create/update chart cards
+  const existingCards = container.querySelectorAll('.gpu-chart-card');
+  const existingMap = {};
+  existingCards.forEach(c => { existingMap[c.dataset.gpuIndex] = c; });
+
+  gpuData.forEach(g => {
+    if (g.error) return;
+    let card = existingMap[g.index];
+    if (!card) {
+      card = document.createElement('div');
+      card.className = 'gpu-chart-card';
+      card.dataset.gpuIndex = g.index;
+      card.innerHTML = `<h3>GPU ${g.index}: ${g.name}</h3><canvas></canvas><div class="gpu-chart-label"></div>`;
+      container.appendChild(card);
+    }
+    const canvas = card.querySelector('canvas');
+    const label = card.querySelector('.gpu-chart-label');
+    const history = gpuHistory[g.index] || [];
+    const usedMb = g.memory_total_mb - g.memory_free_mb;
+    const pct = g.memory_total_mb > 0 ? (usedMb / g.memory_total_mb * 100).toFixed(1) : 0;
+    label.textContent = `${usedMb} / ${g.memory_total_mb} MB (${pct}%)`;
+    drawChart(canvas, history, g.memory_total_mb);
+  });
+}
+
+function drawChart(canvas, history, totalMb) {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  const w = rect.width || 280;
+  const h = 60;
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+
+  // Background
+  const isLight = document.body.classList.contains('light-theme');
+  ctx.fillStyle = isLight ? '#e8eaf0' : '#0a0c10';
+  ctx.fillRect(0, 0, w, h);
+
+  if (history.length < 2 || totalMb <= 0) {
+    ctx.fillStyle = isLight ? '#999' : '#666';
+    ctx.font = '11px sans-serif';
+    ctx.fillText('Collecting data...', 10, h / 2 + 4);
+    return;
+  }
+
+  // Grid lines at 25%, 50%, 75%
+  ctx.strokeStyle = isLight ? '#ccc' : '#222';
+  ctx.lineWidth = 0.5;
+  [0.25, 0.5, 0.75].forEach(pct => {
+    const y = h - (h * pct);
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+  });
+
+  // Draw filled area
+  const points = history.map((d, i) => ({
+    x: (i / (GPU_HISTORY_MAX - 1)) * w,
+    y: h - (d.usedMb / totalMb) * h,
+  }));
+
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, h);
+  points.forEach(p => ctx.lineTo(p.x, p.y));
+  ctx.lineTo(points[points.length - 1].x, h);
+  ctx.closePath();
+  ctx.fillStyle = isLight ? 'rgba(74,106,223,0.2)' : 'rgba(108,140,255,0.15)';
+  ctx.fill();
+
+  // Draw line
+  ctx.beginPath();
+  points.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+  ctx.strokeStyle = isLight ? '#4a6adf' : '#6c8cff';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+}
+
+// --- Model management ---
 async function deleteModel() {
   const model = $('model-select').value;
-  if (!model) { alert('Select a model to delete'); return; }
-  if (!confirm('Delete model "' + model + '"? This cannot be undone.')) return;
+  if (!model) { showToast('Select a model to delete', 'warning'); return; }
+  if (!(await showModal('Delete Model', 'Delete "' + model + '"? This cannot be undone.'))) return;
   try {
     const res = await fetch('/api/models/delete', {
       method: 'POST',
@@ -325,10 +625,11 @@ async function deleteModel() {
       body: JSON.stringify({ model }),
     });
     const data = await res.json();
-    if (!res.ok) { alert(data.error || 'Failed to delete'); return; }
+    if (!res.ok) { showToast(data.error || 'Failed to delete', 'error'); return; }
+    showToast('Model deleted', 'success');
     loadModels();
   } catch (e) {
-    alert('Request failed: ' + e.message);
+    showToast('Request failed: ' + e.message, 'error');
   }
 }
 
@@ -380,25 +681,19 @@ async function updatePpPartition() {
 
   if (numLayers) {
     info.textContent = `(model has ${numLayers} layers)`;
-
-    // Get selected GPUs and their memory
     const gpuIds = [...document.querySelectorAll('#gpu-list input:checked')].map(cb => parseInt(cb.value));
     if (gpuIds.length >= ppSize) {
-      // Sort by memory descending (same as backend)
       const gpusSorted = gpuIds.map(id => {
         const g = gpuData.find(x => x.index === id);
         return { id, mem: g ? g.memory_total_mb : 0 };
       }).sort((a, b) => b.mem - a.mem);
-
       const totalMem = gpusSorted.reduce((s, g) => s + g.mem, 0);
       if (totalMem > 0) {
-        // Distribute proportionally
         const raw = gpusSorted.map(g => g.mem / totalMem * numLayers);
         const parts = raw.map(r => Math.floor(r));
         let remainder = numLayers - parts.reduce((s, p) => s + p, 0);
         const fracs = raw.map((r, i) => ({ frac: r - parts[i], i })).sort((a, b) => b.frac - a.frac);
         for (let j = 0; j < remainder; j++) parts[fracs[j].i]++;
-
         $('pp-layer-partition').placeholder = parts.join(',') + ' (auto)';
       }
     } else {
@@ -410,11 +705,12 @@ async function updatePpPartition() {
   }
 }
 
+// --- Instance management ---
 async function startVllm() {
   const gpuIds = [...document.querySelectorAll('#gpu-list input:checked')].map(cb => parseInt(cb.value));
-  if (gpuIds.length === 0) { alert('Select at least one GPU'); return; }
+  if (gpuIds.length === 0) { showToast('Select at least one GPU', 'warning'); return; }
   const model = $('model-select').value;
-  if (!model) { alert('Select a model'); return; }
+  if (!model) { showToast('Select a model', 'warning'); return; }
 
   const body = {
     model: model,
@@ -442,20 +738,20 @@ async function startVllm() {
     });
     const data = await res.json();
     if (!res.ok) {
-      alert(data.error || 'Failed to start');
+      showToast(data.error || 'Failed to start', 'error');
     } else {
-      // Uncheck GPUs that were just assigned
+      showToast('Instance started', 'success');
       document.querySelectorAll('#gpu-list input:checked').forEach(cb => cb.checked = false);
-      // Select new instance for logs
       selectedLogInstance = data.id;
     }
   } catch (e) {
-    alert('Request failed: ' + e.message);
+    showToast('Request failed: ' + e.message, 'error');
   }
   $('btn-start').disabled = false;
 }
 
 async function stopInstance(instanceId) {
+  if (!(await showModal('Stop Instance', 'Stop instance ' + instanceId + '?'))) return;
   try {
     const res = await fetch('/api/stop', {
       method: 'POST',
@@ -463,10 +759,11 @@ async function stopInstance(instanceId) {
       body: JSON.stringify({ instance_id: instanceId }),
     });
     const data = await res.json();
-    if (!res.ok) alert(data.error || 'Failed to stop');
+    if (!res.ok) showToast(data.error || 'Failed to stop', 'error');
+    else showToast('Instance stopped', 'success');
     if (selectedLogInstance === instanceId) selectedLogInstance = null;
   } catch (e) {
-    alert('Request failed: ' + e.message);
+    showToast('Request failed: ' + e.message, 'error');
   }
 }
 
@@ -483,7 +780,8 @@ async function pollStatus() {
 
     if (instances.length === 0) {
       listEl.innerHTML = '<div class="no-instances">No running instances</div>';
-      $('logs').textContent = '';
+      currentLogs = [];
+      renderLogs();
       $('logs-label').textContent = '';
       return;
     }
@@ -522,30 +820,69 @@ async function pollStatus() {
     const sel = instances.find(s => s.id === selectedLogInstance);
     if (sel) {
       $('logs-label').textContent = '— ' + sel.id;
-      const logsEl = $('logs');
-      const atBottom = logsEl.scrollTop + logsEl.clientHeight >= logsEl.scrollHeight - 20;
-      logsEl.textContent = (sel.logs || []).join('\n');
-      if (atBottom) logsEl.scrollTop = logsEl.scrollHeight;
+      currentLogs = sel.logs || [];
+      renderLogs();
     } else if (instances.length > 0) {
-      // Auto-select first instance
       selectedLogInstance = instances[0].id;
     } else {
       $('logs-label').textContent = '';
-      $('logs').textContent = '';
+      currentLogs = [];
+      renderLogs();
     }
 
-    // Update chat instance dropdown
     updateChatInstances(instances);
-
-    // Refresh GPU list to update in_use status
     loadGpus();
   } catch (e) {}
 }
 
-// Download
+// --- Log filtering, search & download ---
+function toggleLogFilter() {
+  logFilterMode = !logFilterMode;
+  $('log-filter-btn').textContent = 'Filter: ' + (logFilterMode ? 'On' : 'Off');
+  renderLogs();
+}
+
+function renderLogs() {
+  const logsEl = $('logs');
+  const search = ($('log-search').value || '').trim().toLowerCase();
+  const atBottom = logsEl.scrollTop + logsEl.clientHeight >= logsEl.scrollHeight - 20;
+
+  if (!search) {
+    logsEl.textContent = currentLogs.join('\n');
+  } else {
+    const lines = logFilterMode
+      ? currentLogs.filter(l => l.toLowerCase().includes(search))
+      : currentLogs;
+    // Build HTML with highlights
+    logsEl.innerHTML = lines.map(line => {
+      const lower = line.toLowerCase();
+      const idx = lower.indexOf(search);
+      if (idx === -1) return escapeHtml(line);
+      const before = escapeHtml(line.substring(0, idx));
+      const match = escapeHtml(line.substring(idx, idx + search.length));
+      const after = escapeHtml(line.substring(idx + search.length));
+      return before + '<mark>' + match + '</mark>' + after;
+    }).join('\n');
+  }
+
+  if (atBottom) logsEl.scrollTop = logsEl.scrollHeight;
+}
+
+function downloadLogs() {
+  if (currentLogs.length === 0) { showToast('No logs to download', 'warning'); return; }
+  const name = selectedLogInstance || 'vllm';
+  const blob = new Blob([currentLogs.join('\n')], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name + '-logs.txt';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+// --- Download model ---
 async function downloadModel() {
   const repo = $('hf-repo').value.trim();
-  if (!repo) { alert('Enter a HuggingFace repo ID'); return; }
+  if (!repo) { showToast('Enter a HuggingFace repo ID', 'warning'); return; }
   $('btn-download').disabled = true;
   try {
     const res = await fetch('/api/download', {
@@ -554,9 +891,9 @@ async function downloadModel() {
       body: JSON.stringify({ repo_id: repo }),
     });
     const data = await res.json();
-    if (!res.ok) alert(data.error || 'Failed to start download');
+    if (!res.ok) showToast(data.error || 'Failed to start download', 'error');
   } catch (e) {
-    alert('Request failed: ' + e.message);
+    showToast('Request failed: ' + e.message, 'error');
     $('btn-download').disabled = false;
   }
 }
@@ -615,7 +952,10 @@ async function pollDownload() {
       wrap.style.display = d.total_bytes > 0 ? 'block' : 'none';
       $('btn-download').disabled = false;
       _lastDlBytes = 0; _lastDlTime = 0;
-      if (_lastDlStatus === 'downloading') loadModels();
+      if (_lastDlStatus === 'downloading') {
+        showToast('Download complete: ' + d.repo_id, 'success');
+        loadModels();
+      }
     } else if (d.status === 'error') {
       el.textContent = 'Error: ' + d.error;
       wrap.style.display = 'none';
@@ -626,7 +966,7 @@ async function pollDownload() {
   } catch (e) {}
 }
 
-// Chat test
+// --- Chat test ---
 let chatMessages = [];
 let pendingToolCalls = [];
 
@@ -639,18 +979,17 @@ function escapeHtml(s) {
 function chatClear() {
   chatMessages = [];
   pendingToolCalls = [];
-  $('chat-messages').innerHTML = '<div style="color:#666;font-size:0.85rem">Send a message to start chatting.</div>';
+  $('chat-messages').innerHTML = '<div style="color:var(--text-muted);font-size:0.85rem">Send a message to start chatting.</div>';
   $('tool-results').innerHTML = '';
 }
 
 function renderChat() {
   const el = $('chat-messages');
   if (chatMessages.length === 0) {
-    el.innerHTML = '<div style="color:#666;font-size:0.85rem">Send a message to start chatting.</div>';
+    el.innerHTML = '<div style="color:var(--text-muted);font-size:0.85rem">Send a message to start chatting.</div>';
     return;
   }
   el.innerHTML = chatMessages.map(m => {
-    let roleClass = 'chat-role-' + m.role;
     let content = m.content ? escapeHtml(m.content) : '';
     let toolCallsHtml = '';
     if (m.tool_calls && m.tool_calls.length > 0) {
@@ -662,7 +1001,7 @@ function renderChat() {
     }
     let roleLabel = m.role;
     if (m.role === 'tool') roleLabel = 'tool (' + (m.name || '') + ')';
-    return `<div class="chat-msg"><div class="chat-role ${roleClass}">${roleLabel}</div>${content}${toolCallsHtml}</div>`;
+    return `<div class="chat-msg"><div class="chat-role chat-role-${m.role}">${roleLabel}</div>${content}${toolCallsHtml}</div>`;
   }).join('');
   el.scrollTop = el.scrollHeight;
 }
@@ -670,10 +1009,10 @@ function renderChat() {
 function renderToolResultInputs() {
   const el = $('tool-results');
   if (pendingToolCalls.length === 0) { el.innerHTML = ''; return; }
-  el.innerHTML = '<div style="color:#ffb300;font-size:0.85rem;margin-bottom:6px">Provide tool results:</div>' +
+  el.innerHTML = '<div style="color:var(--warning-border);font-size:0.85rem;margin-bottom:6px">Provide tool results:</div>' +
     pendingToolCalls.map((tc, i) => `
       <div class="tool-result-row">
-        <span style="font-size:0.82rem;min-width:120px;color:#ffb300">${escapeHtml(tc.function.name)}:</span>
+        <span style="font-size:0.82rem;min-width:120px;color:var(--warning-border)">${escapeHtml(tc.function.name)}:</span>
         <textarea id="tool-result-${i}" rows="2" placeholder="Tool result (text or JSON)"></textarea>
       </div>
     `).join('') +
@@ -703,13 +1042,13 @@ async function chatSend() {
 
 async function chatComplete() {
   const instanceId = $('chat-instance').value;
-  if (!instanceId) { alert('Select a running instance'); return; }
+  if (!instanceId) { showToast('Select a running instance', 'warning'); return; }
 
   let tools = null;
   const toolsText = $('chat-tools').value.trim();
   if (toolsText) {
     try { tools = JSON.parse(toolsText); }
-    catch (e) { alert('Invalid tools JSON: ' + e.message); return; }
+    catch (e) { showToast('Invalid tools JSON: ' + e.message, 'warning'); return; }
   }
 
   const body = {
@@ -721,7 +1060,7 @@ async function chatComplete() {
   if (tools) body.tools = tools;
 
   const msgEl = $('chat-messages');
-  msgEl.innerHTML += '<div class="chat-msg" id="chat-loading" style="color:#888">Waiting for response...</div>';
+  msgEl.innerHTML += '<div class="chat-msg" id="chat-loading" style="color:var(--text-secondary)">Waiting for response...</div>';
   msgEl.scrollTop = msgEl.scrollHeight;
 
   try {
@@ -734,10 +1073,10 @@ async function chatComplete() {
     const ld = document.getElementById('chat-loading');
     if (ld) ld.remove();
 
-    if (!res.ok) { alert(data.error || JSON.stringify(data)); return; }
+    if (!res.ok) { showToast(data.error || JSON.stringify(data), 'error'); return; }
 
     const choice = data.choices && data.choices[0];
-    if (!choice) { alert('No response from model'); return; }
+    if (!choice) { showToast('No response from model', 'error'); return; }
 
     chatMessages.push(choice.message);
     renderChat();
@@ -749,7 +1088,7 @@ async function chatComplete() {
   } catch (e) {
     const ld = document.getElementById('chat-loading');
     if (ld) ld.remove();
-    alert('Chat request failed: ' + e.message);
+    showToast('Chat request failed: ' + e.message, 'error');
   }
 }
 
