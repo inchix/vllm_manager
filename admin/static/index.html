@@ -742,6 +742,10 @@ async function startVllm() {
   if (gpuIds.length === 0) { showToast('Select at least one GPU', 'warning'); return; }
   const model = $('model-select').value;
   if (!model) { showToast('Select a model', 'warning'); return; }
+  if ($('enable-tool-use').checked && !$('tool-call-parser').value) {
+    showToast('Select a tool call parser (tool use is enabled)', 'warning');
+    return;
+  }
 
   const body = {
     model: model,

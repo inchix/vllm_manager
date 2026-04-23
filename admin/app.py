@@ -430,6 +430,8 @@ async def api_start(req: StartRequest):
                 })
         except ValueError:
             return JSONResponse(status_code=400, content={"error": "PP layer partition must be comma-separated integers (e.g. 14,26)"})
+    if req.enable_tool_use and not req.tool_call_parser:
+        return JSONResponse(status_code=400, content={"error": "tool_call_parser is required when enable_tool_use is true"})
     if req.tool_call_parser and req.tool_call_parser not in ALLOWED_TOOL_PARSERS:
         return JSONResponse(status_code=400, content={"error": f"Invalid tool_call_parser: {req.tool_call_parser}"})
     model_path = _safe_model_path(req.model)
