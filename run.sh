@@ -170,8 +170,8 @@ RUN_ARGS+=(
 RUN_ARGS+=(-e "AUTH_ENABLED=$AUTH_ENABLED")
 [ -n "$ADMIN_API_KEY" ] && RUN_ARGS+=(-e "ADMIN_API_KEY=$ADMIN_API_KEY")
 [ -n "$HF_TOKEN" ]      && RUN_ARGS+=(-e "HF_TOKEN=$HF_TOKEN")
-RUN_ARGS+=(-e "VLLM_PORT_START=$VLLM_PORT_START")
-RUN_ARGS+=(-e "VLLM_PORT_END=$VLLM_PORT_END")
+RUN_ARGS+=(-e "ADMIN_VLLM_PORT_START=$VLLM_PORT_START")
+RUN_ARGS+=(-e "ADMIN_VLLM_PORT_END=$VLLM_PORT_END")
 
 # Extra args: parsed as a shell word list without eval.
 if [ -n "$EXTRA_ARGS" ]; then

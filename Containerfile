@@ -1,7 +1,8 @@
 FROM docker.io/vllm/vllm-openai:nightly
 
 RUN pip install --no-cache-dir nvidia-ml-py \
-    && pip install --no-cache-dir "transformers>=4.56,<5"
+    && pip install --no-cache-dir "transformers>=4.56,<5" \
+    && pip install --no-cache-dir "ray[default]>=2.9"
 
 COPY admin/ /app/admin/
 COPY entrypoint.sh /app/entrypoint.sh

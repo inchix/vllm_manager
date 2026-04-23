@@ -25,8 +25,8 @@ logger = logging.getLogger(__name__)
 
 MODELS_DIR = Path(os.getenv("MODELS_DIR", "/models"))
 
-VLLM_PORT_START = int(os.getenv("VLLM_PORT_START", "8001"))
-VLLM_PORT_END = int(os.getenv("VLLM_PORT_END", "8010"))
+VLLM_PORT_START = int(os.getenv("ADMIN_VLLM_PORT_START", os.getenv("VLLM_PORT_START", "8001")))
+VLLM_PORT_END = int(os.getenv("ADMIN_VLLM_PORT_END", os.getenv("VLLM_PORT_END", "8010")))
 MAX_INSTANCES = VLLM_PORT_END - VLLM_PORT_START + 1
 
 ALLOWED_DTYPES = {"auto", "float16", "bfloat16", "float32"}
