@@ -86,6 +86,7 @@ _PUBLIC_PATHS = {
     "/api/auth/login",
     "/api/auth/status",
     "/api/auth/logout",
+    "/healthz",
 }
 
 

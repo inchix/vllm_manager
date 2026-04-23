@@ -40,6 +40,12 @@ IMAGE_NAME="${IMAGE_NAME:-vllm-manager:latest}"
 
 CMD="${USE_SUDO:+$USE_SUDO }${CONTAINER_RUNTIME}"
 
+# Podman's default OCI image format strips HEALTHCHECK; force docker format.
+BUILD_FORMAT=()
+if [ "$CONTAINER_RUNTIME" = "podman" ]; then
+  BUILD_FORMAT=(--format docker)
+fi
+
 echo "Building $IMAGE_NAME with $CONTAINER_RUNTIME..."
-$CMD build -t "$IMAGE_NAME" "$SCRIPT_DIR"
+$CMD build "${BUILD_FORMAT[@]}" -t "$IMAGE_NAME" "$SCRIPT_DIR"
 echo "Done."
