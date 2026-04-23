@@ -1,0 +1,19 @@
+[Unit]
+Description=vLLM Manager Container
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Run the container in foreground so systemd can supervise and restart it.
+Type=simple
+Environment=DETACH=false
+ExecStartPre=-/usr/bin/sudo /usr/bin/podman rm -f vllm-manager
+ExecStart=/bin/bash /home/adwhite/dev/vllm-multi-gpu/run.sh
+ExecStop=/bin/bash /home/adwhite/dev/vllm-multi-gpu/stop.sh
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=120
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -2,21 +2,21 @@
 
 ## High Priority
 
-- [ ] HuggingFace token support for gated/private models (pass `HF_TOKEN` env var)
+- [x] HuggingFace token support for gated/private models (pass `HF_TOKEN` env var)
 - [ ] Concurrent model downloads (currently limited to one at a time)
-- [ ] Auto-restart instances on crash (configurable)
-- [ ] Persist instance configurations across container restarts
+- [x] Auto-restart instances on crash (configurable, exponential backoff)
+- [x] Persist instance configurations across container restarts
 
 ## Features
 
-- [ ] Model deletion from the UI
+- [x] Model deletion from the UI
 - [ ] Instance resource monitoring (GPU utilization, memory per instance)
-- [ ] Configurable vLLM arguments per instance (additional CLI flags)
+- [ ] Configurable vLLM arguments per instance (allowlisted flags — `extra_args` in `/api/start`)
 - [ ] Model search from HuggingFace Hub in the UI
 - [ ] Instance naming (custom names instead of instance-1, instance-2)
-- [ ] API key / basic auth for the admin UI
+- [x] API key / basic auth for the admin UI (`AUTH_ENABLED`, `ADMIN_API_KEY`)
 - [ ] docker-compose.yml / podman-compose.yml
-- [ ] HTTPS support for admin UI
+- [ ] HTTPS support for admin UI (use a reverse proxy for now)
 
 ## UI Improvements
 
@@ -27,11 +27,22 @@
 - [x] Mobile-responsive layout improvements
 - [x] Toast notifications instead of alert() dialogs
 - [x] Confirmation dialog before stopping instances
+- [x] Login page + Sign out
+
+## Security & Ops
+
+- [x] API-key auth (header + cookie) with `AUTH_ENABLED=false` escape hatch for isolated on-prem
+- [x] Bind admin port to loopback on host by default (`ADMIN_BIND_HOST`)
+- [x] Safe `.env` parsing (no shell execution)
+- [x] Allowlist for `extra_args` passed to vLLM
+- [x] Download state race condition (asyncio.Lock)
+- [x] Container hardening (`no-new-privileges`, `--cap-drop=ALL`, SELinux-ready)
+- [x] Container HEALTHCHECK
+- [x] systemd `Restart=on-failure`
+- [ ] Rate limiting on login + download endpoints
 
 ## Technical Debt
 
 - [ ] Add unit tests for vllm_manager.py
 - [ ] Add integration tests for API endpoints
-- [ ] Health check endpoint for the admin container itself
 - [ ] Structured JSON logging
-- [ ] Rate limiting on download endpoint
