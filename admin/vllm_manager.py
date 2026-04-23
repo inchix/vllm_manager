@@ -3,13 +3,20 @@ import logging
 import os
 import signal
 import subprocess
+import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+MAX_LOG_LINES = 500
+HEALTH_POLL_INTERVAL_SEC = 3
+STOP_GRACE_SEC = 15
+RESTART_BACKOFF_SEC = [2, 4, 8, 16, 32]
+RESTART_RESET_AFTER_SEC = 300  # clean run >5min resets the retry counter
 
 
 class State(str, Enum):
@@ -17,6 +24,7 @@ class State(str, Enum):
     STARTING = "starting"
     RUNNING = "running"
     ERROR = "error"
+    RESTARTING = "restarting"
 
 
 @dataclass
@@ -36,6 +44,14 @@ class VllmConfig:
     enable_tool_use: bool = False
     tool_call_parser: Optional[str] = None
     extra_args: list[str] = field(default_factory=list)
+    auto_restart: bool = True
+
+
+# Callback signatures:
+#   on_exit(instance_id, will_restart) — process died. will_restart=True means
+#     the manager is scheduling a restart; the caller should NOT free resources.
+#   on_state_change(instance_id) — purely informational.
+OnExitCb = Callable[[str, bool], None]
 
 
 @dataclass
@@ -49,7 +65,10 @@ class VllmManager:
     _cmd: list[str] = field(default_factory=list)
     _log_task: Optional[asyncio.Task] = None
     _health_task: Optional[asyncio.Task] = None
-    _on_exit: Optional[Callable] = None
+    _on_exit: Optional[OnExitCb] = None
+    _restart_attempts: int = 0
+    _running_since: float = 0.0
+    _shutting_down: bool = False
 
     def _get_vllm_version(self) -> tuple[int, ...]:
         """Return vLLM version as tuple, e.g. (0, 11, 2) or (0, 16, 0)."""
@@ -111,18 +130,22 @@ class VllmManager:
         return env
 
     async def start(self, config: VllmConfig) -> None:
-        if self.state in (State.RUNNING, State.STARTING):
+        if self.state in (State.RUNNING, State.STARTING, State.RESTARTING):
             raise RuntimeError(f"vLLM is already {self.state.value}")
 
         self.config = config
         self.state = State.STARTING
         self.logs = []
+        self._shutting_down = False
+        self._launch_process()
 
-        cmd = self._build_cmd(config)
+    def _launch_process(self) -> None:
+        assert self.config is not None
+        cmd = self._build_cmd(self.config)
         self._cmd = cmd
-        env = self._build_env(config)
+        env = self._build_env(self.config)
 
-        logger.info("[%s] Starting vLLM on port %s: %s", self.instance_id, config.port, " ".join(cmd))
+        logger.info("[%s] Starting vLLM on port %s: %s", self.instance_id, self.config.port, " ".join(cmd))
         logger.info("[%s] CUDA_VISIBLE_DEVICES=%s", self.instance_id, env["CUDA_VISIBLE_DEVICES"])
 
         self.process = subprocess.Popen(
@@ -133,6 +156,7 @@ class VllmManager:
             text=True,
         )
         self.pid = self.process.pid
+        self._running_since = time.monotonic()
         self._log_task = asyncio.create_task(self._read_logs())
         self._health_task = asyncio.create_task(self._poll_health())
 
@@ -147,9 +171,8 @@ class VllmManager:
                     break
                 line = line.rstrip("\n")
                 self.logs.append(line)
-                # Keep last 500 lines
-                if len(self.logs) > 500:
-                    self.logs = self.logs[-500:]
+                if len(self.logs) > MAX_LOG_LINES:
+                    self.logs = self.logs[-MAX_LOG_LINES:]
         except Exception:
             pass
 
@@ -157,19 +180,13 @@ class VllmManager:
         port = self.config.port if self.config else 8001
         async with httpx.AsyncClient() as client:
             while True:
-                await asyncio.sleep(3)
+                await asyncio.sleep(HEALTH_POLL_INTERVAL_SEC)
                 if self.process is None:
                     return
-                # Check if process exited
                 ret = self.process.poll()
                 if ret is not None:
-                    self.state = State.ERROR if ret != 0 else State.STOPPED
-                    self.process = None
-                    self.pid = None
-                    if self._on_exit:
-                        self._on_exit(self.instance_id)
+                    await self._handle_process_exit(ret)
                     return
-                # Check health endpoint
                 if self.state == State.STARTING:
                     try:
                         resp = await client.get(
@@ -181,7 +198,58 @@ class VllmManager:
                     except httpx.RequestError:
                         pass
 
+    async def _handle_process_exit(self, ret: int) -> None:
+        self.process = None
+        self.pid = None
+
+        if self._shutting_down:
+            self.state = State.STOPPED
+            return
+
+        # If the instance ran clean for long enough, reset the retry counter.
+        if self._running_since and (time.monotonic() - self._running_since) > RESTART_RESET_AFTER_SEC:
+            self._restart_attempts = 0
+
+        should_restart = (
+            self.config is not None
+            and self.config.auto_restart
+            and self._restart_attempts < len(RESTART_BACKOFF_SEC)
+        )
+
+        if not should_restart:
+            self.state = State.ERROR if ret != 0 else State.STOPPED
+            logger.info("[%s] process exited rc=%s (no restart)", self.instance_id, ret)
+            if self._on_exit:
+                self._on_exit(self.instance_id, False)
+            return
+
+        backoff = RESTART_BACKOFF_SEC[self._restart_attempts]
+        self._restart_attempts += 1
+        self.state = State.RESTARTING
+        logger.warning(
+            "[%s] process exited rc=%s; restart %d/%d in %ds",
+            self.instance_id, ret, self._restart_attempts, len(RESTART_BACKOFF_SEC), backoff,
+        )
+        if self._on_exit:
+            self._on_exit(self.instance_id, True)
+
+        try:
+            await asyncio.sleep(backoff)
+        except asyncio.CancelledError:
+            return
+        if self._shutting_down:
+            return
+        try:
+            self.state = State.STARTING
+            self._launch_process()
+        except Exception as e:
+            logger.error("[%s] restart failed: %s", self.instance_id, e)
+            self.state = State.ERROR
+            if self._on_exit:
+                self._on_exit(self.instance_id, False)
+
     async def stop(self) -> None:
+        self._shutting_down = True
         if self.process is None:
             self.state = State.STOPPED
             return
@@ -189,8 +257,9 @@ class VllmManager:
         logger.info("[%s] Stopping vLLM (PID %s)", self.instance_id, self.pid)
         self.process.send_signal(signal.SIGTERM)
 
-        # Wait up to 15 seconds for graceful shutdown
-        for _ in range(30):
+        # Wait up to STOP_GRACE_SEC for graceful shutdown.
+        deadline = time.monotonic() + STOP_GRACE_SEC
+        while time.monotonic() < deadline:
             if self.process.poll() is not None:
                 break
             await asyncio.sleep(0.5)
@@ -225,6 +294,8 @@ class VllmManager:
             "pp_layer_partition": self.config.pp_layer_partition if self.config else None,
             "enable_tool_use": self.config.enable_tool_use if self.config else False,
             "tool_call_parser": self.config.tool_call_parser if self.config else None,
+            "auto_restart": self.config.auto_restart if self.config else False,
+            "restart_attempts": self._restart_attempts,
             "cmd": " ".join(self._cmd) if self._cmd else None,
             "cuda_visible_devices": ",".join(str(g) for g in self.config.gpu_ids) if self.config else None,
             "logs": self.logs[-100:],

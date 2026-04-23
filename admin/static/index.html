@@ -149,6 +149,7 @@
   .dot-starting { background: var(--warning-border); animation: pulse 1s infinite; }
   .dot-running { background: #4caf50; }
   .dot-error { background: #f44336; }
+  .dot-restarting { background: var(--warning-border); animation: pulse 1s infinite; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
   .inst-info { flex: 1; display: flex; flex-wrap: wrap; gap: 4px 16px; }
   .inst-info span { white-space: nowrap; }
@@ -230,7 +231,10 @@
 <body>
 <div class="page-header">
   <h1>vLLM Multi-GPU Admin</h1>
-  <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()">Light Mode</button>
+  <div style="display:flex;gap:8px">
+    <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()">Light Mode</button>
+    <button class="theme-toggle" id="logout-btn" onclick="logout()" style="display:none">Sign out</button>
+  </div>
 </div>
 <div class="grid">
 
@@ -291,6 +295,10 @@
 
     <label style="display:flex;align-items:center;gap:8px;margin-top:14px;cursor:pointer;color:var(--text-primary)">
       <input type="checkbox" id="language-model-only" style="accent-color:var(--accent)"> Language model only (skip image/multimodal processing)
+    </label>
+
+    <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer;color:var(--text-primary)">
+      <input type="checkbox" id="auto-restart" style="accent-color:var(--accent)" checked> Auto-restart on crash (exponential backoff, 5 attempts)
     </label>
 
     <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer;color:var(--text-primary)">
@@ -417,6 +425,29 @@
 <script>
 const $ = id => document.getElementById(id);
 
+// --- Auth-aware fetch: redirect to /login on 401, surface logout button ---
+async function apiFetch(url, opts) {
+  const res = await fetch(url, opts);
+  if (res.status === 401) {
+    window.location.href = '/login';
+    throw new Error('unauthorized');
+  }
+  return res;
+}
+
+async function initAuth() {
+  try {
+    const res = await fetch('/api/auth/status');
+    const d = await res.json();
+    if (d.auth_enabled) $('logout-btn').style.display = 'inline-block';
+  } catch (e) { /* ignore */ }
+}
+
+async function logout() {
+  try { await fetch('/api/auth/logout', { method: 'POST' }); } catch (e) {}
+  window.location.href = '/login';
+}
+
 // --- Theme toggle ---
 function toggleTheme() {
   document.body.classList.toggle('light-theme');
@@ -467,7 +498,7 @@ const GPU_HISTORY_MAX = 60;
 
 async function loadGpus() {
   try {
-    const res = await fetch('/api/gpus');
+    const res = await apiFetch('/api/gpus');
     gpuData = await res.json();
     renderGpus();
     updateGpuHistory();
@@ -619,7 +650,7 @@ async function deleteModel() {
   if (!model) { showToast('Select a model to delete', 'warning'); return; }
   if (!(await showModal('Delete Model', 'Delete "' + model + '"? This cannot be undone.'))) return;
   try {
-    const res = await fetch('/api/models/delete', {
+    const res = await apiFetch('/api/models/delete', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ model }),
@@ -635,7 +666,7 @@ async function deleteModel() {
 
 async function loadModels() {
   try {
-    const res = await fetch('/api/models');
+    const res = await apiFetch('/api/models');
     const models = await res.json();
     const sel = $('model-select');
     if (models.length === 0) {
@@ -656,7 +687,7 @@ async function getModelLayers(modelName) {
   if (!modelName) return null;
   if (modelLayerCache[modelName] !== undefined) return modelLayerCache[modelName];
   try {
-    const res = await fetch(`/api/model-info/${encodeURIComponent(modelName)}`);
+    const res = await apiFetch(`/api/model-info/${encodeURIComponent(modelName)}`);
     const data = await res.json();
     modelLayerCache[modelName] = data.num_hidden_layers || null;
     return modelLayerCache[modelName];
@@ -725,13 +756,14 @@ async function startVllm() {
     enable_tool_use: $('enable-tool-use').checked,
     tool_call_parser: $('enable-tool-use').checked ? ($('tool-call-parser').value || null) : null,
     extra_args: $('extra-args').value.trim(),
+    auto_restart: $('auto-restart').checked,
   };
   const maxLen = $('max-model-len').value;
   if (maxLen) body.max_model_len = parseInt(maxLen);
 
   $('btn-start').disabled = true;
   try {
-    const res = await fetch('/api/start', {
+    const res = await apiFetch('/api/start', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
@@ -753,7 +785,7 @@ async function startVllm() {
 async function stopInstance(instanceId) {
   if (!(await showModal('Stop Instance', 'Stop instance ' + instanceId + '?'))) return;
   try {
-    const res = await fetch('/api/stop', {
+    const res = await apiFetch('/api/stop', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ instance_id: instanceId }),
@@ -773,7 +805,7 @@ function selectInstanceLogs(instanceId) {
 
 async function pollStatus() {
   try {
-    const res = await fetch('/api/status');
+    const res = await apiFetch('/api/status');
     const data = await res.json();
     const instances = data.instances || [];
     const listEl = $('instance-list');
@@ -885,7 +917,7 @@ async function downloadModel() {
   if (!repo) { showToast('Enter a HuggingFace repo ID', 'warning'); return; }
   $('btn-download').disabled = true;
   try {
-    const res = await fetch('/api/download', {
+    const res = await apiFetch('/api/download', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ repo_id: repo }),
@@ -911,7 +943,7 @@ function fmtBytes(b) {
 
 async function pollDownload() {
   try {
-    const res = await fetch('/api/download/status');
+    const res = await apiFetch('/api/download/status');
     const d = await res.json();
     const el = $('dl-status');
     const wrap = $('progress-wrap');
@@ -1064,7 +1096,7 @@ async function chatComplete() {
   msgEl.scrollTop = msgEl.scrollHeight;
 
   try {
-    const res = await fetch('/api/chat', {
+    const res = await apiFetch('/api/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
@@ -1113,6 +1145,7 @@ $('mem-util').addEventListener('input', function() {
 });
 
 // Init
+initAuth();
 loadGpus();
 loadModels();
 pollStatus();
