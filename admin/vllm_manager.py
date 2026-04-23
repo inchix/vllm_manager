@@ -6,6 +6,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
 import httpx
@@ -139,6 +140,19 @@ class VllmManager:
         self._shutting_down = False
         self._launch_process()
 
+    def _open_log_file(self):
+        """Open an append-mode log file for this launch. Survives process crash
+        so post-mortem is possible after the instance is gone from memory."""
+        try:
+            base = Path(os.getenv("MODELS_DIR", "/models")) / ".vllm-manager" / "logs"
+            base.mkdir(parents=True, exist_ok=True)
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            path = base / f"{self.instance_id}-{ts}.log"
+            return open(path, "a", buffering=1)  # line-buffered
+        except Exception as e:
+            logger.warning("[%s] could not open log file: %s", self.instance_id, e)
+            return None
+
     def _launch_process(self) -> None:
         assert self.config is not None
         cmd = self._build_cmd(self.config)
@@ -148,42 +162,60 @@ class VllmManager:
         logger.info("[%s] Starting vLLM on port %s: %s", self.instance_id, self.config.port, " ".join(cmd))
         logger.info("[%s] CUDA_VISIBLE_DEVICES=%s", self.instance_id, env["CUDA_VISIBLE_DEVICES"])
 
-        self.process = subprocess.Popen(
+        proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             env=env,
             text=True,
         )
-        self.pid = self.process.pid
+        self.process = proc
+        self.pid = proc.pid
         self._running_since = time.monotonic()
-        self._log_task = asyncio.create_task(self._read_logs())
-        self._health_task = asyncio.create_task(self._poll_health())
+        log_file = self._open_log_file()
+        if log_file:
+            log_file.write(f"=== launch at {time.strftime('%Y-%m-%d %H:%M:%S')} pid={proc.pid} ===\n")
+            log_file.write("cmd: " + " ".join(cmd) + "\n")
+            log_file.write(f"CUDA_VISIBLE_DEVICES={env['CUDA_VISIBLE_DEVICES']}\n")
+        self._log_task = asyncio.create_task(self._read_logs(proc, log_file))
+        self._health_task = asyncio.create_task(self._poll_health(proc))
 
-    async def _read_logs(self) -> None:
+    async def _read_logs(self, proc: subprocess.Popen, log_file) -> None:
+        """Read subprocess stdout to memory buffer + on-disk log file.
+
+        Both proc and log_file are captured as arguments so a restart
+        creating a fresh process does not disturb this task's view.
+        """
         loop = asyncio.get_event_loop()
         try:
-            while self.process and self.process.stdout:
-                line = await loop.run_in_executor(
-                    None, self.process.stdout.readline
-                )
+            while proc.stdout:
+                line = await loop.run_in_executor(None, proc.stdout.readline)
                 if not line:
                     break
-                line = line.rstrip("\n")
-                self.logs.append(line)
+                stripped = line.rstrip("\n")
+                self.logs.append(stripped)
                 if len(self.logs) > MAX_LOG_LINES:
                     self.logs = self.logs[-MAX_LOG_LINES:]
+                if log_file:
+                    try:
+                        log_file.write(line if line.endswith("\n") else line + "\n")
+                    except Exception:
+                        pass
         except Exception:
             pass
+        finally:
+            if log_file:
+                try:
+                    log_file.close()
+                except Exception:
+                    pass
 
-    async def _poll_health(self) -> None:
+    async def _poll_health(self, proc: subprocess.Popen) -> None:
         port = self.config.port if self.config else 8001
         async with httpx.AsyncClient() as client:
             while True:
                 await asyncio.sleep(HEALTH_POLL_INTERVAL_SEC)
-                if self.process is None:
-                    return
-                ret = self.process.poll()
+                ret = proc.poll()
                 if ret is not None:
                     await self._handle_process_exit(ret)
                     return
@@ -250,23 +282,31 @@ class VllmManager:
 
     async def stop(self) -> None:
         self._shutting_down = True
-        if self.process is None:
+        # Snapshot the handle — the concurrent _handle_process_exit task may
+        # null self.process between our checks, so we operate on the snapshot.
+        proc = self.process
+        if proc is None:
             self.state = State.STOPPED
             return
 
         logger.info("[%s] Stopping vLLM (PID %s)", self.instance_id, self.pid)
-        self.process.send_signal(signal.SIGTERM)
+        try:
+            proc.send_signal(signal.SIGTERM)
+        except ProcessLookupError:
+            pass
 
-        # Wait up to STOP_GRACE_SEC for graceful shutdown.
         deadline = time.monotonic() + STOP_GRACE_SEC
         while time.monotonic() < deadline:
-            if self.process.poll() is not None:
+            if proc.poll() is not None:
                 break
             await asyncio.sleep(0.5)
         else:
             logger.warning("[%s] vLLM did not exit gracefully, sending SIGKILL", self.instance_id)
-            self.process.kill()
-            self.process.wait()
+            try:
+                proc.kill()
+                proc.wait()
+            except ProcessLookupError:
+                pass
 
         self.process = None
         self.pid = None
