@@ -139,6 +139,122 @@ See `admin/app.py` for the full endpoint list: `/api/gpus`, `/api/models`, `/api
 
 The admin container exposes an unauthenticated `/healthz` for the container `HEALTHCHECK`.
 
+## Multi-node / remote GPUs (RDMA)
+
+Cluster mode lets a single vLLM instance span GPUs on **more than one box**, joined
+into one Ray cluster over an RDMA fabric (RoCE/InfiniBand). Enable it with
+`CLUSTER_MODE=true`. When on, `run.sh` switches the container to host networking,
+passes through the RDMA verbs devices (`/dev/infiniband/*`), sets the NCCL RoCE
+env, and `entrypoint.sh` starts a **Ray head** (manager) or joins one (worker).
+
+### Topology guidance
+
+Inter-node links (e.g. 40 GbE RoCE) are far slower than intra-node NVLink, so:
+
+- **Tensor-parallel *within* each box** (over NVLink), **pipeline-parallel *across*
+  boxes** (over RDMA). PP ships far less data across the slow link than TP.
+- The UI's **"Use remote GPUs"** toggle derives this automatically: `PP = number of
+  nodes`, `TP = GPUs per node`.
+- For **uneven per-node GPU memory** (e.g. a 32 GB box + a 16 GB box), set **PP Layer
+  Partition** with one layer count per node (fewer layers on the smaller box). Note
+  that KV-cache is sized to the smallest node.
+
+### Requirements (every node)
+
+- The **byte-identical image** (the Containerfile pins the base by digest for this
+  reason — build once, distribute to every box).
+- The **model files at the same `MODELS_DIR` path**.
+- NCCL stages RDMA through host memory here. **GPUDirect RDMA is not available on
+  ConnectX-3 (mlx4)** — don't bother loading `nvidia_peermem`; it won't enable GDR
+  on this NIC. (Host-staged RoCE RDMA is the expected, working path.)
+- **Firewall**: Ray uses many ports beyond the GCS port (raylet, object manager,
+  dashboard agent, worker range). If the nodes run `firewalld`, a worker will join
+  but then get killed with *"marked as dead by the GCS"* because the head can't
+  health-check it back. On each worker, trust the head's IPs (mgmt + RDMA):
+  ```bash
+  for ip in 172.16.69.201 172.16.254.201 172.16.253.201; do
+    sudo firewall-cmd --permanent --zone=trusted --add-source=$ip/32
+  done
+  sudo firewall-cmd --reload
+  ```
+
+### Cluster settings
+
+| Variable | Where | Description |
+|----------|-------|-------------|
+| `CLUSTER_MODE` | all nodes | `true` to enable host net + RDMA + Ray |
+| `ADMIN_ROLE` | all nodes | `manager` (UI + Ray head) or `worker` (Ray worker only) |
+| `RAY_HEAD_HOST` | workers | Manager box IP (mgmt net) |
+| `RAY_HEAD_PORT` | all nodes | Ray GCS port (default `6379`) |
+| `RAY_NODE_IP` | multi-homed | This node's IP for Ray control traffic |
+| `NCCL_IB_HCA` | all nodes | RDMA HCA (default `mlx4_0`) |
+| `NCCL_IB_GID_INDEX` | all nodes | RoCEv2 GID index (default `3` here) |
+| `NCCL_SOCKET_IFNAME` | per node | RoCE NIC (`enp196s0` mgr / `ens2` worker) |
+| `RDMA_DEVICES` | optional | Char devices to pass; auto-detected if empty |
+
+### Example: manager + one worker
+
+On the **manager** box (`.env`):
+
+```ini
+CLUSTER_MODE=true
+ADMIN_ROLE=manager
+RAY_NODE_IP=172.16.69.201
+NCCL_SOCKET_IFNAME=enp196s0,ens2   # this box's NIC first
+```
+
+On the **worker** box (same image, its own `.env`):
+
+```ini
+CLUSTER_MODE=true
+ADMIN_ROLE=worker
+CONTAINER_NAME=vllm-worker
+RAY_HEAD_HOST=172.16.69.201
+RAY_NODE_IP=172.16.69.230
+NCCL_SOCKET_IFNAME=ens2,enp196s0   # this box's NIC first
+```
+
+> **Heterogeneous NIC names** are the #1 gotcha. The RoCE NIC is named differently
+> per box (`enp196s0` vs `ens2`), and Ray copies the driver's `NCCL_SOCKET_IFNAME`
+> to every worker — so a single name can't work cluster-wide. Use a **comma list
+> with the local NIC first**: NCCL matches whichever exists on each node, and Gloo
+> (which can't parse a list) defaults to the first entry, i.e. the local NIC.
+
+### NCCL tuning for this hardware (V100 + ConnectX-3, no NVLink, IOMMU on)
+
+Two settings (defaulted in `run.sh`, and in the committed `.env` files) are required
+here — leave them unless your hardware differs:
+
+- **`NCCL_P2P_DISABLE=1`** — these V100s have **no active NVLink** and the host runs
+  **AMD-Vi IOMMU in translated mode**, which breaks GPU PCIe P2P. `nvidia-smi topo
+  -p2p r` may say "OK", but NCCL will **hang at comm init** trying P2P. Disabling it
+  forces the intra-node **SHM** transport (needs a large `/dev/shm` — `SHM_SIZE`,
+  default 16g, provides it). Verify: `nvidia-smi nvlink -s` (inactive) and
+  `dmesg | grep -i iommu` (translated).
+- **`NCCL_IB_HCA=mlx4_0:1`** — ConnectX-3 exposes **two ports on different subnets**
+  (`172.16.254.x` and `172.16.253.x`). Unpinned, NCCL pairs port1↔port2 across nodes
+  and the RoCE queue-pair transition fails (`ibv_modify_qp` errno 22, cross-subnet
+  GID). Pin to one port so all nodes share a subnet.
+
+> ⚠️ **Known open issue:** even with the above, one inter-node NCCL communicator can
+> still stall during channel setup (see `TODO.md`). Single-node instances are
+> unaffected; the remote-GPU path needs further NCCL tuning on this fabric.
+
+```bash
+# manager box
+bash run.sh
+# worker box (contributes its GPUs and blocks)
+bash run.sh
+```
+
+Then open the admin UI: the **GPUs** card shows a **Cluster** panel (joined nodes +
+total GPUs), and the launch form gains a **"Use remote GPUs"** toggle once ≥2 nodes
+have joined. The cluster's GPU total and layout are managed by Ray — you don't pick
+remote GPU indices.
+
+> Cluster mode needs Ray to write to its temp dir (`/tmp/ray`, a tmpfs). If Ray
+> complains about a read-only filesystem, set `READ_ONLY=false` on that node.
+
 ## Docker vs Podman
 
 ### Docker
@@ -171,6 +287,44 @@ sudo systemctl enable --now vllm-manager
 
 `Restart=on-failure` means the container comes back automatically on crash.
 
+## Updating the vLLM version
+
+The Containerfile pins the base image by **digest** (not the floating `:nightly`
+tag) so every node in a cluster runs the exact same vLLM/NCCL build. To update:
+
+```bash
+CONTAINER_RUNTIME=podman   # or docker
+sudo $CONTAINER_RUNTIME pull docker.io/vllm/vllm-openai:nightly
+sudo $CONTAINER_RUNTIME image inspect docker.io/vllm/vllm-openai:nightly --format '{{.Digest}}'
+# Replace the sha256 in Containerfile's FROM line with the printed digest, then:
+bash build.sh
+```
+
+Rebuild on **every** node from the same digest. `transformers` is pinned `<6`; if a
+newer nightly requires `transformers>=6`, bump that constraint in the Containerfile.
+
+### ⚠️ GPU architecture / CUDA constraint (V100 and other Volta cards)
+
+The base image is currently pinned to the **stable** `vllm/vllm-openai:latest`
+(vLLM 0.17.1, torch 2.10+cu129) **on purpose**: the current `:nightly` ships torch
+built against **CUDA 13 (cu130), which dropped Volta (sm_70)**. On a V100 the newer
+build fails at kernel launch with:
+
+```
+CUDA error: no kernel image is available for execution on the device
+torch ... does not include kernels for this GPU ... compute capability (CC) 7.0
+```
+
+CUDA-12 builds (cu126/cu128/cu129) still include `sm_70`, so **stay on a CUDA-12
+vLLM build for as long as the cluster runs V100s**. Newer vLLM needs Ampere+
+(sm_80+). Before pinning any new digest, verify it supports your GPUs:
+
+```bash
+sudo podman run --rm --device /dev/nvidia0 --device /dev/nvidiactl --device /dev/nvidia-uvm \
+  --entrypoint python3 <image> -c "import torch; print(torch.cuda.get_arch_list())"
+# must include 'sm_70' for V100
+```
+
 ## Architecture
 
 ```
@@ -198,7 +352,7 @@ Each vLLM instance runs as a subprocess managed by the admin backend. GPU isolat
 ├── build.sh               # Build the container image
 ├── run.sh                 # Start the container (hardened, loopback by default)
 ├── stop.sh                # Stop the container
-├── entrypoint.sh          # Container entrypoint (starts admin UI)
+├── entrypoint.sh          # Container entrypoint (admin UI, or Ray head/worker in cluster mode)
 ├── vllm-manager.service   # systemd unit (Restart=on-failure)
 ├── admin/
 │   ├── __init__.py

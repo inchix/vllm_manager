@@ -64,6 +64,41 @@ AUTH_ENABLED="${AUTH_ENABLED:-true}"
 ADMIN_API_KEY="${ADMIN_API_KEY:-}"
 HF_TOKEN="${HF_TOKEN:-}"
 
+# --------- Cluster / multi-node (remote GPU over RDMA) ---------
+# When CLUSTER_MODE=true the container uses host networking + RDMA passthrough
+# so a Ray cluster can span multiple boxes. Run the manager on one box and one
+# or more workers (ADMIN_ROLE=worker, CLUSTER_MODE=true, RAY_HEAD_HOST set) on
+# the extra GPU boxes. See README "Multi-node / remote GPUs".
+CLUSTER_MODE="${CLUSTER_MODE:-false}"
+ADMIN_ROLE="${ADMIN_ROLE:-manager}"        # manager | worker
+RAY_HEAD_HOST="${RAY_HEAD_HOST:-}"         # manager box IP (required on workers)
+RAY_HEAD_PORT="${RAY_HEAD_PORT:-6379}"
+RAY_NODE_IP="${RAY_NODE_IP:-}"             # this node's IP for Ray control traffic
+# NCCL over RoCE. GID index 3 = RoCEv2 on the mlx4 fabric here (see README).
+# Pin to a single HCA PORT (mlx4_0:1) so every node uses the same RoCE subnet —
+# ConnectX-3 has 2 ports on different subnets and NCCL will otherwise try to
+# pair port1<->port2 across nodes, which fails the RDMA QP transition.
+NCCL_IB_HCA="${NCCL_IB_HCA:-mlx4_0:1}"
+NCCL_IB_GID_INDEX="${NCCL_IB_GID_INDEX:-3}"
+# Broken PCIe P2P (no NVLink here + host IOMMU in translated mode) makes NCCL
+# hang at comm init; force the intra-node SHM transport instead. /dev/shm must
+# be large enough — run.sh already sets --shm-size (SHM_SIZE, default 16g).
+NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
+# Heterogeneous NIC names: NICs are named differently per box (enp196s0 on the
+# manager, ens2 on ebola). NCCL accepts a COMMA LIST and picks whichever exists
+# on each node, and Ray copies the driver's NCCL_SOCKET_IFNAME to all workers —
+# so use the SAME list everywhere, but put THIS box's NIC FIRST.
+#   manager .env: NCCL_SOCKET_IFNAME=enp196s0,ens2
+#   ebola   .env: NCCL_SOCKET_IFNAME=ens2,enp196s0
+NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-}"
+NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-0}"
+# Gloo (vLLM's CPU-side coordination) does NOT accept a comma list — it needs one
+# interface that exists on THIS box. Default it to the first entry of the NCCL
+# list (this box's NIC, per the ordering rule above); override if needed. Gloo is
+# NOT copied to workers by Ray, so each node keeps its own value.
+GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-${NCCL_SOCKET_IFNAME%%,*}}"
+RDMA_DEVICES="${RDMA_DEVICES:-}"           # space-separated char devices; auto if empty
+
 # Build command prefix
 CMD="${USE_SUDO:+$USE_SUDO }${CONTAINER_RUNTIME}"
 
@@ -158,13 +193,51 @@ fi
 [ -n "$CUDA_LIB" ]      && RUN_ARGS+=(-v "$CUDA_LIB:/usr/local/nvidia/lib64/libcuda.so.1:ro")
 [ -n "$NVPTX_LIB" ]     && RUN_ARGS+=(-v "$NVPTX_LIB:/usr/local/nvidia/lib64/libnvidia-ptxjitcompiler.so.1:ro")
 
-# Port mappings: bind admin port to the requested host interface; vLLM ports
-# stay on 0.0.0.0 because callers usually want LAN-reachable model endpoints.
-RUN_ARGS+=(
-  -p "$VLLM_PORT_START-$VLLM_PORT_END:$VLLM_PORT_START-$VLLM_PORT_END"
-  -p "$ADMIN_BIND_HOST:$ADMIN_PORT:7080"
-  -v "$MODELS_DIR:/models${VOL_SUFFIX}"
-)
+# Models volume is needed on EVERY node — workers load the model locally too,
+# so the same files must exist at the same path on each box.
+RUN_ARGS+=(-v "$MODELS_DIR:/models${VOL_SUFFIX}")
+
+if [ "$CLUSTER_MODE" = "true" ]; then
+  # Host networking so Ray head/worker + NCCL can reach each other on the real
+  # host interfaces. A bridged NAT with fixed port maps cannot form a cluster
+  # (Ray uses a wide dynamic port range; NCCL needs the RoCE NIC IPs directly).
+  RUN_ARGS+=(--network=host)
+
+  # RDMA verbs device passthrough (RoCE/IB). Auto-detect if RDMA_DEVICES unset.
+  if [ -z "$RDMA_DEVICES" ]; then
+    for d in /dev/infiniband/uverbs* /dev/infiniband/rdma_cm; do
+      [ -e "$d" ] && RUN_ARGS+=(--device "$d")
+    done
+  else
+    for d in $RDMA_DEVICES; do
+      [ -e "$d" ] && RUN_ARGS+=(--device "$d")
+    done
+  fi
+
+  # NCCL over the RoCE fabric.
+  RUN_ARGS+=(-e "NCCL_IB_HCA=$NCCL_IB_HCA")
+  RUN_ARGS+=(-e "NCCL_IB_GID_INDEX=$NCCL_IB_GID_INDEX")
+  RUN_ARGS+=(-e "NCCL_IB_DISABLE=$NCCL_IB_DISABLE")
+  [ -n "$NCCL_SOCKET_IFNAME" ] && RUN_ARGS+=(-e "NCCL_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME")
+  [ -n "$GLOO_SOCKET_IFNAME" ] && RUN_ARGS+=(-e "GLOO_SOCKET_IFNAME=$GLOO_SOCKET_IFNAME")
+
+  # Cluster / Ray wiring consumed by entrypoint.sh.
+  RUN_ARGS+=(-e "CLUSTER_MODE=true")
+  RUN_ARGS+=(-e "ADMIN_ROLE=$ADMIN_ROLE")
+  RUN_ARGS+=(-e "RAY_HEAD_PORT=$RAY_HEAD_PORT")
+  [ -n "$RAY_HEAD_HOST" ] && RUN_ARGS+=(-e "RAY_HEAD_HOST=$RAY_HEAD_HOST")
+  [ -n "$RAY_NODE_IP" ]   && RUN_ARGS+=(-e "RAY_NODE_IP=$RAY_NODE_IP")
+
+  # A worker has no admin UI, so the image's 7080 healthcheck would flap.
+  [ "$ADMIN_ROLE" = "worker" ] && RUN_ARGS+=(--no-healthcheck)
+else
+  # Single-node: publish admin + vLLM ports as before. Admin port binds to the
+  # requested host interface; vLLM ports stay on 0.0.0.0 for LAN reachability.
+  RUN_ARGS+=(
+    -p "$VLLM_PORT_START-$VLLM_PORT_END:$VLLM_PORT_START-$VLLM_PORT_END"
+    -p "$ADMIN_BIND_HOST:$ADMIN_PORT:7080"
+  )
+fi
 
 # Pass through auth + HF env vars
 RUN_ARGS+=(-e "AUTH_ENABLED=$AUTH_ENABLED")
@@ -172,6 +245,20 @@ RUN_ARGS+=(-e "AUTH_ENABLED=$AUTH_ENABLED")
 [ -n "$HF_TOKEN" ]      && RUN_ARGS+=(-e "HF_TOKEN=$HF_TOKEN")
 RUN_ARGS+=(-e "ADMIN_VLLM_PORT_START=$VLLM_PORT_START")
 RUN_ARGS+=(-e "ADMIN_VLLM_PORT_END=$VLLM_PORT_END")
+
+# Persist the torch.compile / Triton / vLLM compile caches on the models volume.
+# The rootfs is read-only and /root/.cache + /root/.triton are tmpfs, so without
+# this EVERY start recompiles kernels from scratch — pathologically slow on older
+# GPUs (e.g. Volta/V100, where some models' torch.compile'd ops take many minutes).
+# Each node keeps its own cache (models dirs are per-node).
+RUN_ARGS+=(-e "VLLM_CACHE_ROOT=/models/.vllm-cache")
+RUN_ARGS+=(-e "TORCHINDUCTOR_CACHE_DIR=/models/.vllm-cache/inductor")
+RUN_ARGS+=(-e "TRITON_CACHE_DIR=/models/.vllm-cache/triton")
+
+# Broken PCIe P2P (no NVLink + host IOMMU translated) hangs NCCL's intra-node
+# all-reduce on ANY multi-GPU run (single-node TP>1 too, not just clusters), so
+# force the SHM path in every mode. See README "NCCL tuning".
+RUN_ARGS+=(-e "NCCL_P2P_DISABLE=$NCCL_P2P_DISABLE")
 
 # Extra args: parsed as a shell word list without eval.
 if [ -n "$EXTRA_ARGS" ]; then
@@ -183,9 +270,21 @@ RUN_ARGS+=("$IMAGE_REF")
 
 echo "Starting $CONTAINER_NAME..."
 echo "  Runtime:    $CONTAINER_RUNTIME"
-echo "  Admin UI:   http://$ADMIN_BIND_HOST:$ADMIN_PORT"
-echo "  Auth:       $([ "$AUTH_ENABLED" = "true" ] && echo enabled || echo DISABLED)"
-echo "  vLLM ports: $VLLM_PORT_START-$VLLM_PORT_END"
+echo "  Role:       $ADMIN_ROLE"
+if [ "$CLUSTER_MODE" = "true" ]; then
+  echo "  Cluster:    ENABLED (host network, RDMA passthrough, Ray)"
+  if [ "$ADMIN_ROLE" = "worker" ]; then
+    echo "  Ray head:   ${RAY_HEAD_HOST:-<unset!>}:$RAY_HEAD_PORT"
+  else
+    echo "  Ray head:   this box:$RAY_HEAD_PORT"
+    echo "  Admin UI:   http://$ADMIN_BIND_HOST:$ADMIN_PORT (host network)"
+  fi
+  echo "  NCCL:       HCA=$NCCL_IB_HCA GID=$NCCL_IB_GID_INDEX IFNAME=${NCCL_SOCKET_IFNAME:-auto}"
+else
+  echo "  Admin UI:   http://$ADMIN_BIND_HOST:$ADMIN_PORT"
+  echo "  Auth:       $([ "$AUTH_ENABLED" = "true" ] && echo enabled || echo DISABLED)"
+  echo "  vLLM ports: $VLLM_PORT_START-$VLLM_PORT_END"
+fi
 echo "  Models:     $MODELS_DIR"
 echo ""
 

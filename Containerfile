@@ -1,4 +1,17 @@
-FROM docker.io/vllm/vllm-openai:nightly
+# Pinned by digest for reproducibility. Every node in a multi-node cluster MUST
+# run the byte-identical image (matching vLLM/NCCL); a floating tag would drift
+# between boxes.
+#
+# IMPORTANT — Volta (V100 / sm_70) constraint:
+# This is the STABLE `vllm/vllm-openai:latest` (vLLM 0.17.1, torch 2.10+cu129).
+# The current `:nightly` ships torch built against CUDA 13 (cu130), and CUDA 13
+# DROPPED Volta — it fails on V100 with "no kernel image is available for
+# execution on the device". cu129 still includes sm_70 kernels, so stay on a
+# CUDA-12 build for as long as this cluster runs V100s. Newer vLLM needs
+# Ampere+ (sm_80+). To move up on Volta-compatible hardware, pick a newer
+# digest whose torch is still cu12x and whose arch_list includes sm_70.
+#   vllm/vllm-openai:latest pinned 2026-07-29 (vLLM 0.17.1, torch 2.10+cu129)
+FROM docker.io/vllm/vllm-openai@sha256:0dc46f74eb0e630675d83101dc66c6441c4475cceedcf9235ee42b87c3affd23
 
 RUN pip install --no-cache-dir nvidia-ml-py \
     && pip install --no-cache-dir "transformers>=5.5,<6" \

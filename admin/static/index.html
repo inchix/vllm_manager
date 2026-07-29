@@ -246,6 +246,7 @@
     </div>
     <div class="warning" id="gpu-warning"></div>
     <div class="gpu-list" id="gpu-list">Loading...</div>
+    <div id="cluster-panel" style="display:none;margin-top:12px;padding:10px 12px;background:var(--bg-input);border-radius:6px;font-size:0.85rem"></div>
   </div>
 
   <!-- Model & Config -->
@@ -290,8 +291,14 @@
     <div id="pp-partition-row" style="display:none">
       <label>PP Layer Partition <span id="pp-layers-info" style="font-weight:normal"></span></label>
       <input type="text" id="pp-layer-partition" placeholder="auto-computed from GPU memory">
-      <div style="font-size:12px;margin-top:2px;color:var(--text-secondary)">Leave blank to auto-distribute layers by GPU memory</div>
+      <div style="font-size:12px;margin-top:2px;color:var(--text-secondary)">Leave blank to auto-distribute layers by GPU memory (for cluster mode, one value per node)</div>
     </div>
+
+    <label id="use-cluster-label" style="display:none;align-items:center;gap:8px;margin-top:14px;cursor:pointer;color:var(--text-primary)">
+      <input type="checkbox" id="use-cluster" style="accent-color:var(--accent)" onchange="onUseClusterChanged()">
+      Use remote GPUs (span the whole cluster)
+    </label>
+    <div id="cluster-hint" style="display:none;font-size:12px;margin-top:2px;color:var(--text-secondary)"></div>
 
     <label style="display:flex;align-items:center;gap:8px;margin-top:14px;cursor:pointer;color:var(--text-primary)">
       <input type="checkbox" id="language-model-only" style="accent-color:var(--accent)"> Language model only (skip image/multimodal processing)
@@ -736,10 +743,74 @@ async function updatePpPartition() {
   }
 }
 
+// --- Cluster (remote GPUs) ---
+let clusterData = { enabled: false };
+
+async function loadCluster() {
+  try {
+    const res = await apiFetch('/api/cluster');
+    clusterData = await res.json();
+  } catch (e) {
+    clusterData = { enabled: false };
+  }
+  renderCluster();
+}
+
+function renderCluster() {
+  const panel = $('cluster-panel');
+  const label = $('use-cluster-label');
+  if (!clusterData.enabled) {
+    panel.style.display = 'none';
+    label.style.display = 'none';
+    return;
+  }
+  const nodes = clusterData.nodes || [];
+  const alive = clusterData.alive_nodes || 0;
+  const gpus = clusterData.total_gpus || 0;
+  let html = `<strong>Cluster:</strong> ${alive} node(s), ${gpus} GPU(s) total`;
+  if (clusterData.error) {
+    html += ` <span style="color:var(--warning-border)">— ${clusterData.error}</span>`;
+  } else if (nodes.length) {
+    html += '<div style="margin-top:6px">' + nodes.map(n =>
+      `<div>${n.alive ? '🟢' : '⚪'} ${n.ip || '?'} — ${n.gpus} GPU</div>`).join('') + '</div>';
+  }
+  panel.innerHTML = html;
+  panel.style.display = 'block';
+
+  // Remote-GPU launch needs at least 2 joined nodes.
+  label.style.display = alive >= 2 ? 'flex' : 'none';
+  if (alive < 2 && $('use-cluster').checked) {
+    $('use-cluster').checked = false;
+    onUseClusterChanged();
+  }
+}
+
+function onUseClusterChanged() {
+  const on = $('use-cluster').checked;
+  // When spanning the cluster, Ray schedules the GPUs; local GPU selection and
+  // PP size are derived from the cluster shape.
+  $('gpu-list').style.opacity = on ? '0.5' : '1';
+  $('gpu-list').style.pointerEvents = on ? 'none' : 'auto';
+  $('pp-size').disabled = on;
+  $('pp-partition-row').style.display = (on || (parseInt($('pp-size').value) || 1) > 1) ? 'block' : 'none';
+  const hint = $('cluster-hint');
+  if (on) {
+    const gpus = clusterData.total_gpus || 0;
+    const nodes = clusterData.alive_nodes || 0;
+    const tp = nodes ? Math.floor(gpus / nodes) : 0;
+    hint.textContent = `Layout: pipeline-parallel ${nodes} (across nodes) × tensor-parallel ${tp} (within each node) = ${gpus} GPUs. `
+      + `For uneven per-node memory, set PP Layer Partition with one value per node.`;
+    hint.style.display = 'block';
+  } else {
+    hint.style.display = 'none';
+  }
+}
+
 // --- Instance management ---
 async function startVllm() {
+  const useCluster = $('use-cluster').checked;
   const gpuIds = [...document.querySelectorAll('#gpu-list input:checked')].map(cb => parseInt(cb.value));
-  if (gpuIds.length === 0) { showToast('Select at least one GPU', 'warning'); return; }
+  if (!useCluster && gpuIds.length === 0) { showToast('Select at least one GPU', 'warning'); return; }
   const model = $('model-select').value;
   if (!model) { showToast('Select a model', 'warning'); return; }
   if ($('enable-tool-use').checked && !$('tool-call-parser').value) {
@@ -749,18 +820,19 @@ async function startVllm() {
 
   const body = {
     model: model,
-    gpu_ids: gpuIds,
+    gpu_ids: useCluster ? [] : gpuIds,
     served_model_name: $('served-model-name').value.trim() || null,
     gpu_memory_utilization: parseFloat($('mem-util').value),
     dtype: $('dtype').value,
     model_impl: $('model-impl').value,
     language_model_only: $('language-model-only').checked,
-    pipeline_parallel_size: parseInt($('pp-size').value) || 1,
-    pp_layer_partition: parseInt($('pp-size').value) > 1 ? ($('pp-layer-partition').value.trim() || null) : null,
+    pipeline_parallel_size: useCluster ? 1 : (parseInt($('pp-size').value) || 1),
+    pp_layer_partition: (useCluster || parseInt($('pp-size').value) > 1) ? ($('pp-layer-partition').value.trim() || null) : null,
     enable_tool_use: $('enable-tool-use').checked,
     tool_call_parser: $('enable-tool-use').checked ? ($('tool-call-parser').value || null) : null,
     extra_args: $('extra-args').value.trim(),
     auto_restart: $('auto-restart').checked,
+    use_cluster: useCluster,
   };
   const maxLen = $('max-model-len').value;
   if (maxLen) body.max_model_len = parseInt(maxLen);
@@ -835,7 +907,8 @@ async function pollStatus() {
             <div class="inst-info">
               <span><b>${s.id}</b></span>
               <span><span class="inst-label">Model:</span> ${model}</span>
-              <span><span class="inst-label">GPUs:</span> ${gpus}</span>
+              <span><span class="inst-label">GPUs:</span> ${s.use_cluster ? 'cluster' : gpus}</span>
+              ${s.use_cluster ? '<span class="inst-label" style="color:var(--accent)">⛓ remote</span>' : ''}
               ${apiUrl ? `<span><span class="inst-label">API:</span> ${apiUrl}</span>` : ''}
               <span><span class="inst-label">dtype:</span> ${s.dtype || 'auto'}</span>
               <span><span class="inst-label">TP:</span> ${s.tensor_parallel_size || '?'}</span>
@@ -1152,10 +1225,12 @@ $('mem-util').addEventListener('input', function() {
 initAuth();
 loadGpus();
 loadModels();
+loadCluster();
 pollStatus();
 pollDownload();
 setInterval(pollStatus, 3000);
 setInterval(pollDownload, 3000);
+setInterval(loadCluster, 5000);
 </script>
 </body>
 </html>

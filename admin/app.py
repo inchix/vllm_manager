@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 
 MODELS_DIR = Path(os.getenv("MODELS_DIR", "/models"))
 
+# Multi-node: set by run.sh when CLUSTER_MODE=true. Enables the /api/cluster
+# endpoint and the "use remote GPUs" launch path (Ray schedules workers across
+# boxes). entrypoint.sh has already started a Ray head on this container.
+CLUSTER_MODE = os.getenv("CLUSTER_MODE", "false").lower() == "true"
+
 VLLM_PORT_START = int(os.getenv("ADMIN_VLLM_PORT_START", os.getenv("VLLM_PORT_START", "8001")))
 VLLM_PORT_END = int(os.getenv("ADMIN_VLLM_PORT_END", os.getenv("VLLM_PORT_END", "8010")))
 MAX_INSTANCES = VLLM_PORT_END - VLLM_PORT_START + 1
@@ -378,6 +383,58 @@ def api_model_info(model_name: str):
     return {"model": model_name, "num_hidden_layers": num_layers}
 
 
+async def _ray_cluster_info() -> dict:
+    """Best-effort snapshot of the local Ray cluster via `ray list nodes`.
+
+    Returns {nodes: [{ip, gpus, alive}], total_gpus, alive_nodes, error?}.
+    Never raises — the cluster may be down or Ray not yet joined.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ray", "list", "nodes", "--format", "json", "--limit", "100",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=8)
+        if proc.returncode != 0:
+            return {"nodes": [], "total_gpus": 0, "alive_nodes": 0,
+                    "error": (err.decode()[:300].strip() or "ray list nodes failed")}
+        raw = json_mod.loads(out.decode() or "[]")
+    except Exception as e:
+        return {"nodes": [], "total_gpus": 0, "alive_nodes": 0, "error": str(e)}
+
+    # Ray keeps records for dead nodes; a box that (re)joined shows up multiple
+    # times. Collapse by IP so the UI shows one row per box (alive if any record
+    # for that IP is alive), and count GPUs only for live boxes.
+    by_ip: dict = {}
+    for n in raw:
+        alive = str(n.get("state", "")).upper() == "ALIVE"
+        res = n.get("resources_total") or {}
+        try:
+            gpus = int(res.get("GPU", 0) or 0)
+        except (TypeError, ValueError):
+            gpus = 0
+        ip = n.get("node_ip") or n.get("node_name") or "?"
+        cur = by_ip.get(ip)
+        if cur is None:
+            by_ip[ip] = {"ip": ip, "gpus": gpus, "alive": alive}
+        else:
+            cur["alive"] = cur["alive"] or alive
+            cur["gpus"] = max(cur["gpus"], gpus)
+
+    nodes = list(by_ip.values())
+    total = sum(n["gpus"] for n in nodes if n["alive"])
+    alive_nodes = sum(1 for n in nodes if n["alive"])
+    return {"nodes": nodes, "total_gpus": total, "alive_nodes": alive_nodes}
+
+
+@app.get("/api/cluster")
+async def api_cluster():
+    if not CLUSTER_MODE:
+        return {"enabled": False}
+    info = await _ray_cluster_info()
+    return {"enabled": True, **info}
+
+
 @app.get("/api/status")
 def api_status():
     return {"instances": [inst.get_status() for inst in _instances.values()]}
@@ -398,11 +455,132 @@ class StartRequest(BaseModel):
     tool_call_parser: Optional[str] = None
     extra_args: str = ""
     auto_restart: bool = True
+    # When True, span the Ray cluster (remote GPUs on other boxes). gpu_ids /
+    # pipeline_parallel_size from the form are ignored; the layout is derived
+    # from the cluster shape (TP within a node, PP across nodes).
+    use_cluster: bool = False
+
+
+async def _start_cluster_instance(req: StartRequest):
+    """Launch a vLLM instance that spans the whole Ray cluster (remote GPUs).
+
+    Layout is homogeneous: tensor-parallel within each node, pipeline-parallel
+    across nodes. Ray schedules the workers, so we don't pin GPU indices; we do
+    reserve all local GPUs so no single-node instance collides with placement.
+    """
+    global _instance_counter
+
+    if not CLUSTER_MODE:
+        return JSONResponse(status_code=400, content={
+            "error": "Cluster mode is not enabled on this container. Set CLUSTER_MODE=true and restart."
+        })
+    if req.dtype not in ALLOWED_DTYPES:
+        return JSONResponse(status_code=400, content={"error": f"Invalid dtype: {req.dtype}"})
+    if req.model_impl not in ALLOWED_MODEL_IMPLS:
+        return JSONResponse(status_code=400, content={"error": f"Invalid model_impl: {req.model_impl}"})
+    if req.enable_tool_use and not req.tool_call_parser:
+        return JSONResponse(status_code=400, content={"error": "tool_call_parser is required when enable_tool_use is true"})
+    if req.tool_call_parser and req.tool_call_parser not in ALLOWED_TOOL_PARSERS:
+        return JSONResponse(status_code=400, content={"error": f"Invalid tool_call_parser: {req.tool_call_parser}"})
+
+    model_path = _safe_model_path(req.model)
+    if not model_path or not model_path.is_dir():
+        return JSONResponse(status_code=400, content={"error": "Invalid model name"})
+
+    info = await _ray_cluster_info()
+    if info.get("error"):
+        return JSONResponse(status_code=502, content={"error": f"Ray cluster unavailable: {info['error']}"})
+    num_nodes = info.get("alive_nodes", 0)
+    total_gpus = info.get("total_gpus", 0)
+    if num_nodes < 2:
+        return JSONResponse(status_code=409, content={
+            "error": f"Need at least 2 Ray nodes for remote GPUs; {num_nodes} joined. Start a worker on the other box."
+        })
+    if total_gpus < 2 or total_gpus % num_nodes != 0:
+        return JSONResponse(status_code=400, content={
+            "error": f"Cluster has {total_gpus} GPU(s) across {num_nodes} node(s); need an even split. "
+                     "Balance the boxes or launch per-node instances instead."
+        })
+    pp_size = num_nodes
+    tp_size = total_gpus // num_nodes
+
+    # A cluster instance uses the whole local box; refuse if local GPUs are busy.
+    if _used_gpus:
+        return JSONResponse(status_code=409, content={
+            "error": f"Local GPUs {sorted(_used_gpus)} are in use. Stop local instances before launching a cluster instance."
+        })
+    if not _available_ports:
+        return JSONResponse(status_code=409, content={"error": f"No available ports (max {MAX_INSTANCES} instances)"})
+
+    extra_args, err = _validate_extra_args(req.extra_args)
+    if err:
+        return JSONResponse(status_code=400, content={"error": err})
+
+    # Optional manual layer partition for uneven per-node memory (e.g. 32GB vs
+    # 16GB boxes). Auto-compute is local-only, so we can't size remote nodes.
+    pp_layer_partition = req.pp_layer_partition or None
+    if pp_layer_partition:
+        try:
+            parts = [int(x) for x in pp_layer_partition.split(",")]
+        except ValueError:
+            return JSONResponse(status_code=400, content={"error": "PP layer partition must be comma-separated integers"})
+        if len(parts) != pp_size:
+            return JSONResponse(status_code=400, content={
+                "error": f"PP layer partition needs {pp_size} values (one per node), got {len(parts)}"
+            })
+        num_layers = _get_num_hidden_layers(req.model)
+        if num_layers and sum(parts) != num_layers:
+            return JSONResponse(status_code=400, content={
+                "error": f"PP layer partition sums to {sum(parts)} but model has {num_layers} layers"
+            })
+
+    port = _available_ports.pop(0)
+    _instance_counter += 1
+    instance_id = f"instance-{_instance_counter}"
+
+    local_gpu_ids = [g["index"] for g in get_gpus() if "index" in g]
+
+    config = VllmConfig(
+        model=str(model_path),
+        gpu_ids=local_gpu_ids,
+        tensor_parallel_size=tp_size,
+        port=port,
+        gpu_memory_utilization=req.gpu_memory_utilization,
+        max_model_len=req.max_model_len,
+        dtype=req.dtype,
+        model_impl=req.model_impl,
+        served_model_name=req.served_model_name or None,
+        language_model_only=req.language_model_only,
+        pipeline_parallel_size=pp_size,
+        pp_layer_partition=pp_layer_partition,
+        enable_tool_use=req.enable_tool_use,
+        tool_call_parser=req.tool_call_parser,
+        extra_args=extra_args or [],
+        auto_restart=req.auto_restart,
+        use_cluster=True,
+    )
+
+    mgr = VllmManager(instance_id=instance_id, _on_exit=_on_instance_exit)
+    _instances[instance_id] = mgr
+    _used_gpus.update(local_gpu_ids)
+
+    try:
+        await mgr.start(config)
+        _persist()
+        return {"status": "starting", "id": instance_id, "port": port, "pid": mgr.pid,
+                "cluster": {"nodes": num_nodes, "tensor_parallel_size": tp_size, "pipeline_parallel_size": pp_size}}
+    except RuntimeError as e:
+        _free_instance_resources(mgr)
+        _instances.pop(instance_id, None)
+        return JSONResponse(status_code=409, content={"error": str(e)})
 
 
 @app.post("/api/start")
 async def api_start(req: StartRequest):
     global _instance_counter
+
+    if req.use_cluster:
+        return await _start_cluster_instance(req)
 
     if req.dtype not in ALLOWED_DTYPES:
         return JSONResponse(status_code=400, content={"error": f"Invalid dtype: {req.dtype}"})

@@ -46,6 +46,10 @@ class VllmConfig:
     tool_call_parser: Optional[str] = None
     extra_args: list[str] = field(default_factory=list)
     auto_restart: bool = True
+    # Multi-node: when True the instance spans the Ray cluster (remote GPUs on
+    # other boxes). Ray schedules workers across nodes, so we must NOT pin
+    # CUDA_VISIBLE_DEVICES and we always use the ray executor backend.
+    use_cluster: bool = False
 
 
 # Callback signatures:
@@ -101,9 +105,23 @@ class VllmManager:
                 cmd.extend(["--tool-call-parser", config.tool_call_parser])
         if config.pipeline_parallel_size > 1:
             cmd.extend(["--pipeline-parallel-size", str(config.pipeline_parallel_size)])
-        # Use ray backend for multi-GPU to avoid V1 MultiprocExecutor bugs
-        if config.tensor_parallel_size > 1 or config.pipeline_parallel_size > 1:
+        # Executor backend:
+        #   - Multi-node (use_cluster): Ray is required to place workers across boxes.
+        #   - Single-node multi-GPU: use the "mp" (multiprocessing) executor. On this
+        #     hardware (V100 + no NVLink + host IOMMU) the Ray executor HANGS the TP
+        #     profiling/forward, while mp works (verified: mp profiles in ~3s and
+        #     serves; Ray never completes). This is the opposite of the old default.
+        multi_gpu = config.use_cluster or config.tensor_parallel_size > 1 or config.pipeline_parallel_size > 1
+        if config.use_cluster:
             cmd.extend(["--distributed-executor-backend", "ray"])
+        elif config.tensor_parallel_size > 1 or config.pipeline_parallel_size > 1:
+            cmd.extend(["--distributed-executor-backend", "mp"])
+        # vLLM's custom all-reduce uses GPU P2P, which is broken on this hardware
+        # (no NVLink + host IOMMU) and HANGS the forward. Disable it for any
+        # multi-GPU instance so NCCL (SHM/NET) is used instead. Skip if the caller
+        # already passed the flag.
+        if multi_gpu and "--disable-custom-all-reduce" not in (config.extra_args or []):
+            cmd.append("--disable-custom-all-reduce")
         cmd.extend([
             "--tensor-parallel-size", str(config.tensor_parallel_size),
             "--gpu-memory-utilization", str(config.gpu_memory_utilization),
@@ -125,7 +143,14 @@ class VllmManager:
     def _build_env(self, config: VllmConfig) -> dict[str, str]:
         env = os.environ.copy()
         env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in config.gpu_ids)
+        if config.use_cluster:
+            # Let Ray schedule GPUs across the cluster; pinning CUDA_VISIBLE_DEVICES
+            # on the driver would fight Ray's placement. Connect to the head that
+            # entrypoint.sh started on this box.
+            env.pop("CUDA_VISIBLE_DEVICES", None)
+            env["RAY_ADDRESS"] = os.getenv("RAY_ADDRESS", "auto")
+        else:
+            env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in config.gpu_ids)
         if config.pp_layer_partition:
             env["VLLM_PP_LAYER_PARTITION"] = config.pp_layer_partition
         return env
@@ -159,8 +184,9 @@ class VllmManager:
         self._cmd = cmd
         env = self._build_env(self.config)
 
+        cvd = env.get("CUDA_VISIBLE_DEVICES", "(unset — Ray schedules cluster GPUs)")
         logger.info("[%s] Starting vLLM on port %s: %s", self.instance_id, self.config.port, " ".join(cmd))
-        logger.info("[%s] CUDA_VISIBLE_DEVICES=%s", self.instance_id, env["CUDA_VISIBLE_DEVICES"])
+        logger.info("[%s] CUDA_VISIBLE_DEVICES=%s", self.instance_id, cvd)
 
         proc = subprocess.Popen(
             cmd,
@@ -176,7 +202,7 @@ class VllmManager:
         if log_file:
             log_file.write(f"=== launch at {time.strftime('%Y-%m-%d %H:%M:%S')} pid={proc.pid} ===\n")
             log_file.write("cmd: " + " ".join(cmd) + "\n")
-            log_file.write(f"CUDA_VISIBLE_DEVICES={env['CUDA_VISIBLE_DEVICES']}\n")
+            log_file.write(f"CUDA_VISIBLE_DEVICES={cvd}\n")
         self._log_task = asyncio.create_task(self._read_logs(proc, log_file))
         self._health_task = asyncio.create_task(self._poll_health(proc))
 
@@ -332,6 +358,7 @@ class VllmManager:
             "model_impl": self.config.model_impl if self.config else None,
             "pipeline_parallel_size": self.config.pipeline_parallel_size if self.config else 1,
             "pp_layer_partition": self.config.pp_layer_partition if self.config else None,
+            "use_cluster": self.config.use_cluster if self.config else False,
             "enable_tool_use": self.config.enable_tool_use if self.config else False,
             "tool_call_parser": self.config.tool_call_parser if self.config else None,
             "auto_restart": self.config.auto_restart if self.config else False,
