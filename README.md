@@ -155,9 +155,14 @@ Inter-node links (e.g. 40 GbE RoCE) are far slower than intra-node NVLink, so:
   boxes** (over RDMA). PP ships far less data across the slow link than TP.
 - The UI's **"Use remote GPUs"** toggle derives this automatically: `PP = number of
   nodes`, `TP = GPUs per node`.
-- For **uneven per-node GPU memory** (e.g. a 32 GB box + a 16 GB box), set **PP Layer
-  Partition** with one layer count per node (fewer layers on the smaller box). Note
-  that KV-cache is sized to the smallest node.
+- For **uneven per-node GPU memory** (e.g. a 32 GB box + a 16 GB box), a cluster
+  instance **auto-computes a memory-weighted PP layer split** — it probes each node's
+  total GPU memory over Ray and gives bigger nodes proportionally more layers (a 64 GB
+  box gets 2× the layers of a 32 GB box), ordered to match vLLM's PP-stage assignment
+  (driver/manager node = stage 0). This lets a larger model fit than an even split
+  would (which would OOM the smaller GPUs). Override any time by passing an explicit
+  **PP Layer Partition** (one count per node). Note the model checkpoint must still fit
+  on each node's disk, and KV-cache is sized to the tightest stage.
 
 ### Requirements (every node)
 

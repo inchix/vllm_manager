@@ -427,6 +427,82 @@ async def _ray_cluster_info() -> dict:
     return {"nodes": nodes, "total_gpus": total, "alive_nodes": alive_nodes}
 
 
+# Ray script (run as a subprocess) that probes each alive node for its total GPU
+# memory. num_gpus=0 so it schedules even while an instance holds the GPUs; pynvml
+# reads memory without reserving a device. Returns the driver IP + per-node totals.
+_RAY_TOPO_SCRIPT = r"""
+import json, ray
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+ray.init(address="auto", log_to_driver=False)
+driver_ip = ray.util.get_node_ip_address()
+alive = [n for n in ray.nodes() if n.get("Alive")]
+@ray.remote(num_gpus=0)
+def probe():
+    import pynvml, ray as _r
+    pynvml.nvmlInit()
+    c = pynvml.nvmlDeviceGetCount()
+    tot = sum(pynvml.nvmlDeviceGetMemoryInfo(pynvml.nvmlDeviceGetHandleByIndex(i)).total for i in range(c))
+    pynvml.nvmlShutdown()
+    return {"ip": _r.util.get_node_ip_address(), "gpu_count": c, "gpu_mem_total": int(tot)}
+refs = [probe.options(scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=n["NodeID"], soft=False)).remote()
+        for n in alive]
+print(json.dumps({"driver_ip": driver_ip, "nodes": ray.get(refs)}))
+"""
+
+
+async def _cluster_gpu_topology() -> Optional[dict]:
+    """Probe per-node total GPU memory across the Ray cluster (best effort)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "python3", "-c", _RAY_TOPO_SCRIPT,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=30)
+        if proc.returncode != 0:
+            logger.warning("cluster GPU topology probe failed: %s", err.decode()[:300])
+            return None
+        # The script prints one JSON line; ignore any ray log noise on stdout.
+        line = [l for l in out.decode().splitlines() if l.strip().startswith("{")]
+        return json_mod.loads(line[-1]) if line else None
+    except Exception as e:
+        logger.warning("cluster GPU topology probe error: %s", e)
+        return None
+
+
+def _order_nodes_for_pp(topo: dict) -> list[dict]:
+    """Order nodes the way vLLM assigns PP stages: driver node first, then others
+    by (worker/GPU count, ip) — see ray_executor.sort_by_driver_then_worker_ip."""
+    driver_ip = topo.get("driver_ip")
+    nodes = [n for n in topo.get("nodes", []) if n.get("gpu_mem_total")]
+    return sorted(nodes, key=lambda n: (0 if n["ip"] == driver_ip else 1,
+                                        n.get("gpu_count", 0), n.get("ip", "")))
+
+
+async def _compute_cluster_pp_partition(num_layers: int, pp_size: int) -> Optional[str]:
+    """Memory-weighted PP layer split across nodes, in vLLM's PP-stage order.
+    Bigger-memory nodes (e.g. the 32GB box) get proportionally more layers."""
+    topo = await _cluster_gpu_topology()
+    if not topo:
+        return None
+    ordered = _order_nodes_for_pp(topo)
+    if len(ordered) != pp_size:
+        logger.warning("PP auto-partition: probed %d nodes but pp_size=%d; using even split",
+                       len(ordered), pp_size)
+        return None
+    mems = [n["gpu_mem_total"] for n in ordered]
+    total_mem = sum(mems)
+    if total_mem <= 0:
+        return None
+    raw = [m / total_mem * num_layers for m in mems]
+    parts = [int(r) for r in raw]
+    remainder = num_layers - sum(parts)
+    for _, i in sorted(((raw[i] - parts[i], i) for i in range(len(raw))), reverse=True)[:remainder]:
+        parts[i] += 1
+    logger.info("PP auto-partition by GPU mem %s -> layers %s (nodes %s)",
+                mems, parts, [n["ip"] for n in ordered])
+    return ",".join(str(p) for p in parts)
+
+
 @app.get("/api/cluster")
 async def api_cluster():
     if not CLUSTER_MODE:
@@ -516,8 +592,9 @@ async def _start_cluster_instance(req: StartRequest):
     if err:
         return JSONResponse(status_code=400, content={"error": err})
 
-    # Optional manual layer partition for uneven per-node memory (e.g. 32GB vs
-    # 16GB boxes). Auto-compute is local-only, so we can't size remote nodes.
+    # PP layer partition across nodes. A manual value wins; otherwise auto-compute
+    # a memory-weighted split so bigger-memory nodes (e.g. the 32GB box) take more
+    # layers than the 16GB box — an even split would OOM the smaller GPUs.
     pp_layer_partition = req.pp_layer_partition or None
     if pp_layer_partition:
         try:
@@ -533,6 +610,13 @@ async def _start_cluster_instance(req: StartRequest):
             return JSONResponse(status_code=400, content={
                 "error": f"PP layer partition sums to {sum(parts)} but model has {num_layers} layers"
             })
+    else:
+        num_layers = _get_num_hidden_layers(req.model)
+        if num_layers:
+            pp_layer_partition = await _compute_cluster_pp_partition(num_layers, pp_size)
+            if pp_layer_partition:
+                logger.info("Auto cross-node PP partition: %s (model has %d layers)",
+                            pp_layer_partition, num_layers)
 
     port = _available_ports.pop(0)
     _instance_counter += 1

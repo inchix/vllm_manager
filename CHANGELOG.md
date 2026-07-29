@@ -20,6 +20,11 @@ cluster over an RDMA fabric (RoCE/InfiniBand).
 - **UI**: a Cluster panel (nodes + GPU totals) and a **"Use remote GPUs"** toggle on
   the launch form (appears once ≥2 nodes join); cluster instances get a `⛓ remote`
   badge.
+- **Automatic memory-weighted PP layer partition** across nodes: probes each node's
+  total GPU memory over Ray and gives bigger-memory nodes proportionally more layers
+  (ordered to match vLLM's driver-first PP-stage assignment), so a 32 GB + 16 GB
+  cluster splits e.g. 2:1 instead of evenly and doesn't OOM the smaller GPUs. Override
+  with an explicit `pp_layer_partition`.
 
 Verified end to end: 4× V100 across 2 boxes (TP=2 intra-node × PP=2 inter-node)
 serving inference over **RoCE RDMA**.
