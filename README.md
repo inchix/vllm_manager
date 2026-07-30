@@ -21,15 +21,36 @@ Web-based admin UI for running multiple vLLM instances across multiple GPUs. Man
 git clone https://github.com/inchix/vllm_manager.git
 cd vllm_manager
 
-cp .env.example .env
-# Edit .env — set MODELS_DIR, adjust ports, choose docker/podman
-
-bash build.sh
-bash run.sh
-
-# Container prints the admin API key on first start (unless you set ADMIN_API_KEY).
+./setup.sh            # detects GPUs/RDMA, writes .env, offers to build + run
 open http://127.0.0.1:7080
 ```
+
+`setup.sh` auto-detects the local hardware (GPU count, NVLink, IOMMU, RDMA
+HCA/port/RoCEv2 GID, RoCE NIC) and only asks for what it can't infer (role,
+models dir, and — for a worker — the manager's IP). Nothing about a specific
+fabric is baked in. Or configure by hand:
+
+```bash
+cp .env.example .env   # edit MODELS_DIR, runtime, cluster/NCCL settings
+bash build.sh && bash run.sh
+```
+
+### Multi-node cluster
+
+Run `setup.sh` on each box:
+
+```bash
+# manager (admin UI + Ray head)
+./setup.sh --role manager --models-dir /export/llm_models
+# each worker box
+./setup.sh --role worker --head-host <MANAGER_IP> --models-dir /export/llm_models
+```
+
+It writes the right `.env` per node (role, this node's RoCE NIC/GID, P2P/executor
+workarounds where the hardware needs them). See **Multi-node / remote GPUs** below
+for the fabric and shared-storage details.
+
+> Container prints the admin API key on first start unless `ADMIN_API_KEY` is set.
 
 ## Requirements
 
@@ -354,6 +375,7 @@ Each vLLM instance runs as a subprocess managed by the admin backend. GPU isolat
 ```
 ├── Containerfile          # Image definition (extends vllm/vllm-openai)
 ├── .env.example           # Configuration template
+├── setup.sh              # Hardware-detecting installer (writes .env, cluster-aware)
 ├── build.sh               # Build the container image
 ├── run.sh                 # Start the container (hardened, loopback by default)
 ├── stop.sh                # Stop the container

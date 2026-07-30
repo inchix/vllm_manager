@@ -29,6 +29,16 @@ cluster over an RDMA fabric (RoCE/InfiniBand).
 Verified end to end: 4× V100 across 2 boxes (TP=2 intra-node × PP=2 inter-node)
 serving inference over **RoCE RDMA**.
 
+### Added — `setup.sh` (hardware-detecting installer, cluster-aware)
+
+- `./setup.sh` auto-detects the local hardware — GPU count, active NVLink, IOMMU,
+  RDMA HCA + port count, RoCEv2 GID index, RoCE NIC — and generates a `.env` with
+  the right NCCL/executor settings (e.g. pins `mlx4_0:1` only when a card has
+  multiple ports; disables P2P + custom all-reduce only when NVLink is absent and
+  IOMMU is on). Nothing about any specific fabric is hardcoded.
+- Handles `--role manager|worker|single`, `--head-host`, `--models-dir`, etc.,
+  interactive or non-interactive (`--yes`), and offers to build + run.
+
 ### Changed — no hardcoded hardware/cluster specifics
 
 Everything cluster- or hardware-specific is now configurable via `.env` with
