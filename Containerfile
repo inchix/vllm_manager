@@ -15,7 +15,12 @@ FROM docker.io/vllm/vllm-openai@sha256:0dc46f74eb0e630675d83101dc66c6441c4475cce
 
 RUN pip install --no-cache-dir nvidia-ml-py \
     && pip install --no-cache-dir "transformers>=5.5,<6" \
-    && pip install --no-cache-dir "ray[default]>=2.9"
+    && pip install --no-cache-dir "ray[default]>=2.9" \
+    && pip install --no-cache-dir "mistral_common>=1.11.5"
+# mistral_common>=1.11.5: transformers 5.14's tokenization_mistral_common gates
+# its imports on is_mistral_common_available() which requires >=1.11.5; the base
+# image ships 1.9.1, so Mistral/Devstral (tekken tokenizer) models fail to load
+# with "NameError: SpecialTokens" without this bump.
 
 COPY admin/ /app/admin/
 COPY entrypoint.sh /app/entrypoint.sh

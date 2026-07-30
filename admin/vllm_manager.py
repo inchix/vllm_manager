@@ -105,22 +105,22 @@ class VllmManager:
                 cmd.extend(["--tool-call-parser", config.tool_call_parser])
         if config.pipeline_parallel_size > 1:
             cmd.extend(["--pipeline-parallel-size", str(config.pipeline_parallel_size)])
-        # Executor backend:
+        # Executor backend (configurable — see .env.example):
         #   - Multi-node (use_cluster): Ray is required to place workers across boxes.
-        #   - Single-node multi-GPU: use the "mp" (multiprocessing) executor. On this
-        #     hardware (V100 + no NVLink + host IOMMU) the Ray executor HANGS the TP
-        #     profiling/forward, while mp works (verified: mp profiles in ~3s and
-        #     serves; Ray never completes). This is the opposite of the old default.
+        #   - Single-node multi-GPU: MULTIGPU_EXECUTOR env, default "mp". Some
+        #     hardware (e.g. V100 + no NVLink + host IOMMU) hangs the Ray executor's
+        #     TP forward while "mp" works; "ray" is available if a setup prefers it.
         multi_gpu = config.use_cluster or config.tensor_parallel_size > 1 or config.pipeline_parallel_size > 1
         if config.use_cluster:
             cmd.extend(["--distributed-executor-backend", "ray"])
         elif config.tensor_parallel_size > 1 or config.pipeline_parallel_size > 1:
-            cmd.extend(["--distributed-executor-backend", "mp"])
-        # vLLM's custom all-reduce uses GPU P2P, which is broken on this hardware
-        # (no NVLink + host IOMMU) and HANGS the forward. Disable it for any
-        # multi-GPU instance so NCCL (SHM/NET) is used instead. Skip if the caller
-        # already passed the flag.
-        if multi_gpu and "--disable-custom-all-reduce" not in (config.extra_args or []):
+            cmd.extend(["--distributed-executor-backend", os.getenv("MULTIGPU_EXECUTOR", "mp")])
+        # vLLM's custom all-reduce needs working GPU P2P. On hardware where P2P is
+        # broken (no NVLink + host IOMMU) it HANGS the forward — set
+        # DISABLE_CUSTOM_ALL_REDUCE=true to add --disable-custom-all-reduce. Default
+        # off (leave vLLM's default; custom all-reduce is faster when P2P works).
+        _disable_car = os.getenv("DISABLE_CUSTOM_ALL_REDUCE", "").lower() in ("1", "true", "yes")
+        if multi_gpu and _disable_car and "--disable-custom-all-reduce" not in (config.extra_args or []):
             cmd.append("--disable-custom-all-reduce")
         cmd.extend([
             "--tensor-parallel-size", str(config.tensor_parallel_size),

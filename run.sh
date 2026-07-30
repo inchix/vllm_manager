@@ -74,16 +74,23 @@ ADMIN_ROLE="${ADMIN_ROLE:-manager}"        # manager | worker
 RAY_HEAD_HOST="${RAY_HEAD_HOST:-}"         # manager box IP (required on workers)
 RAY_HEAD_PORT="${RAY_HEAD_PORT:-6379}"
 RAY_NODE_IP="${RAY_NODE_IP:-}"             # this node's IP for Ray control traffic
-# NCCL over RoCE. GID index 3 = RoCEv2 on the mlx4 fabric here (see README).
-# Pin to a single HCA PORT (mlx4_0:1) so every node uses the same RoCE subnet —
-# ConnectX-3 has 2 ports on different subnets and NCCL will otherwise try to
-# pair port1<->port2 across nodes, which fails the RDMA QP transition.
-NCCL_IB_HCA="${NCCL_IB_HCA:-mlx4_0:1}"
-NCCL_IB_GID_INDEX="${NCCL_IB_GID_INDEX:-3}"
-# Broken PCIe P2P (no NVLink here + host IOMMU in translated mode) makes NCCL
-# hang at comm init; force the intra-node SHM transport instead. /dev/shm must
-# be large enough — run.sh already sets --shm-size (SHM_SIZE, default 16g).
-NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
+# NCCL tuning — ALL empty by default (let NCCL auto-detect); set per-fabric in .env.
+# Only passed to the container when non-empty, so a stock deploy stays generic.
+#   NCCL_IB_HCA        e.g. "mlx4_0:1" — pin to one HCA:port when a card has
+#                      multiple ports on different subnets (else NCCL cross-pairs
+#                      them and the RDMA QP transition fails).
+#   NCCL_IB_GID_INDEX  e.g. "3" for RoCEv2 on some fabrics; empty = NCCL default.
+#   NCCL_P2P_DISABLE   set "1" if GPU PCIe P2P is broken (no NVLink + host IOMMU),
+#                      which otherwise hangs NCCL at comm init (forces SHM).
+NCCL_IB_HCA="${NCCL_IB_HCA:-}"
+NCCL_IB_GID_INDEX="${NCCL_IB_GID_INDEX:-}"
+NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-}"
+# Manager behaviour for multi-GPU instances (read by admin/vllm_manager.py):
+#   MULTIGPU_EXECUTOR         single-node multi-GPU executor: mp | ray (default mp)
+#   DISABLE_CUSTOM_ALL_REDUCE "true" to add --disable-custom-all-reduce (needed
+#                             when GPU P2P is broken; custom all-reduce uses P2P)
+MULTIGPU_EXECUTOR="${MULTIGPU_EXECUTOR:-}"
+DISABLE_CUSTOM_ALL_REDUCE="${DISABLE_CUSTOM_ALL_REDUCE:-}"
 # Heterogeneous NIC names: NICs are named differently per box (enp196s0 on the
 # manager, ens2 on ebola). NCCL accepts a COMMA LIST and picks whichever exists
 # on each node, and Ray copies the driver's NCCL_SOCKET_IFNAME to all workers —
@@ -214,9 +221,9 @@ if [ "$CLUSTER_MODE" = "true" ]; then
     done
   fi
 
-  # NCCL over the RoCE fabric.
-  RUN_ARGS+=(-e "NCCL_IB_HCA=$NCCL_IB_HCA")
-  RUN_ARGS+=(-e "NCCL_IB_GID_INDEX=$NCCL_IB_GID_INDEX")
+  # NCCL over the fabric — only pass what's set (empty = NCCL auto-detects).
+  [ -n "$NCCL_IB_HCA" ]        && RUN_ARGS+=(-e "NCCL_IB_HCA=$NCCL_IB_HCA")
+  [ -n "$NCCL_IB_GID_INDEX" ]  && RUN_ARGS+=(-e "NCCL_IB_GID_INDEX=$NCCL_IB_GID_INDEX")
   RUN_ARGS+=(-e "NCCL_IB_DISABLE=$NCCL_IB_DISABLE")
   [ -n "$NCCL_SOCKET_IFNAME" ] && RUN_ARGS+=(-e "NCCL_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME")
   [ -n "$GLOO_SOCKET_IFNAME" ] && RUN_ARGS+=(-e "GLOO_SOCKET_IFNAME=$GLOO_SOCKET_IFNAME")
@@ -250,15 +257,19 @@ RUN_ARGS+=(-e "ADMIN_VLLM_PORT_END=$VLLM_PORT_END")
 # The rootfs is read-only and /root/.cache + /root/.triton are tmpfs, so without
 # this EVERY start recompiles kernels from scratch — pathologically slow on older
 # GPUs (e.g. Volta/V100, where some models' torch.compile'd ops take many minutes).
-# Each node keeps its own cache (models dirs are per-node).
-RUN_ARGS+=(-e "VLLM_CACHE_ROOT=/models/.vllm-cache")
-RUN_ARGS+=(-e "TORCHINDUCTOR_CACHE_DIR=/models/.vllm-cache/inductor")
-RUN_ARGS+=(-e "TRITON_CACHE_DIR=/models/.vllm-cache/triton")
+# Each node keeps its own cache (models dirs are per-node). Override CACHE_DIR to
+# disable/relocate.
+CACHE_DIR="${CACHE_DIR:-/models/.vllm-cache}"
+if [ -n "$CACHE_DIR" ]; then
+  RUN_ARGS+=(-e "VLLM_CACHE_ROOT=$CACHE_DIR")
+  RUN_ARGS+=(-e "TORCHINDUCTOR_CACHE_DIR=$CACHE_DIR/inductor")
+  RUN_ARGS+=(-e "TRITON_CACHE_DIR=$CACHE_DIR/triton")
+fi
 
-# Broken PCIe P2P (no NVLink + host IOMMU translated) hangs NCCL's intra-node
-# all-reduce on ANY multi-GPU run (single-node TP>1 too, not just clusters), so
-# force the SHM path in every mode. See README "NCCL tuning".
-RUN_ARGS+=(-e "NCCL_P2P_DISABLE=$NCCL_P2P_DISABLE")
+# Hardware/manager tuning — only passed when set (see .env.example for guidance).
+[ -n "$NCCL_P2P_DISABLE" ]          && RUN_ARGS+=(-e "NCCL_P2P_DISABLE=$NCCL_P2P_DISABLE")
+[ -n "$MULTIGPU_EXECUTOR" ]         && RUN_ARGS+=(-e "MULTIGPU_EXECUTOR=$MULTIGPU_EXECUTOR")
+[ -n "$DISABLE_CUSTOM_ALL_REDUCE" ] && RUN_ARGS+=(-e "DISABLE_CUSTOM_ALL_REDUCE=$DISABLE_CUSTOM_ALL_REDUCE")
 
 # Extra args: parsed as a shell word list without eval.
 if [ -n "$EXTRA_ARGS" ]; then

@@ -29,6 +29,21 @@ cluster over an RDMA fabric (RoCE/InfiniBand).
 Verified end to end: 4× V100 across 2 boxes (TP=2 intra-node × PP=2 inter-node)
 serving inference over **RoCE RDMA**.
 
+### Changed — no hardcoded hardware/cluster specifics
+
+Everything cluster- or hardware-specific is now configurable via `.env` with
+neutral defaults (nothing baked into committed code):
+
+- `NCCL_IB_HCA`, `NCCL_IB_GID_INDEX`, `NCCL_P2P_DISABLE` now default **empty**
+  (NCCL auto-detects) and are only passed to the container when set — the fabric
+  specifics (e.g. `mlx4_0:1`, GID `3`, P2P off) live in your `.env`.
+- New `MULTIGPU_EXECUTOR` (default `mp`) and `DISABLE_CUSTOM_ALL_REDUCE`
+  (default off) replace the hardcoded single-node executor choice and the
+  always-on `--disable-custom-all-reduce` (both were V100/IOMMU workarounds).
+- New `CACHE_DIR` to relocate/disable the persistent compile cache.
+- `mistral_common>=1.11.5` added to the image (required by transformers 5.14's
+  Mistral/Devstral tokenizer path; the base ships 1.9.1 → `NameError: SpecialTokens`).
+
 ### Added — reproducibility & caching
 
 - **Base image pinned by digest** (not the floating `nightly`/`latest` tag) so every
