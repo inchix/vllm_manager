@@ -188,6 +188,128 @@
   overflow-x: auto; white-space: pre; margin: 0;
 }
 
+/* ---- (D) instance row actions ----------------------------------------- */
+.sv-row-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+
+/* ---- (E) cluster log viewer -------------------------------------------
+   A modal: the log stream wants height and its own scroll, and an inline
+   panel would shove the launch form off screen every time it grows. On a
+   phone it goes full-bleed; on a wide screen it is a centred sheet. */
+.sv-root {
+  /* One colour per node, in the order the response lists them. Head vs
+     worker has to be scannable at a glance in a 2000-line wall of text. */
+  --sv-log-c0: #6c8cff;
+  --sv-log-c1: #ffb74d;
+  --sv-log-c2: #4db6ac;
+  --sv-log-c3: #ba68c8;
+  --sv-log-c4: #aed581;
+  --sv-log-c5: #f06292;
+}
+body.light-theme .sv-root {
+  --sv-log-c0: #3050c8;
+  --sv-log-c1: #a05a00;
+  --sv-log-c2: #00695c;
+  --sv-log-c3: #7b1fa2;
+  --sv-log-c4: #33691e;
+  --sv-log-c5: #ad1457;
+}
+
+.sv-log-overlay {
+  position: fixed; inset: 0; z-index: 900;
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+.sv-log-overlay[hidden] { display: none; }
+.sv-log-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.62); }
+
+.sv-log-panel {
+  position: relative; display: flex; flex-direction: column;
+  width: min(1100px, 100%); height: min(80vh, 100%);
+  background: var(--bg-card, #1a1d27); border: 1px solid var(--border-card, #2a2d37);
+  border-radius: 10px; box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5); overflow: hidden;
+}
+
+.sv-log-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 14px 16px 10px;
+}
+.sv-log-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.sv-log-id { font-size: 0.95rem; font-weight: 600; color: var(--text-heading, #fff); }
+.sv-log-model {
+  font-size: 0.75rem; min-width: 0; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sv-root .sv-log-x { flex: 0 0 auto; }
+
+.sv-log-nodes { padding: 0 16px 10px; }
+.sv-log-chip { border-left: 3px solid var(--sv-log-c0); }
+.sv-log-chip.sv-log-c0 { border-left-color: var(--sv-log-c0); }
+.sv-log-chip.sv-log-c1 { border-left-color: var(--sv-log-c1); }
+.sv-log-chip.sv-log-c2 { border-left-color: var(--sv-log-c2); }
+.sv-log-chip.sv-log-c3 { border-left-color: var(--sv-log-c3); }
+.sv-log-chip.sv-log-c4 { border-left-color: var(--sv-log-c4); }
+.sv-log-chip.sv-log-c5 { border-left-color: var(--sv-log-c5); }
+.sv-log-chip-bad { border-left-color: var(--red, #c62828) !important; }
+.sv-log-chip-bad .dim { color: var(--red, #c62828); }
+
+.sv-log-controls {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 0 16px 12px; border-bottom: 1px solid var(--border-card, #2a2d37);
+}
+.sv-root .sv-log-controls .btn { padding: 6px 14px; font-size: 0.82rem; }
+.sv-log-follow { min-width: 108px; }
+.sv-log-ctl { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; }
+.sv-log-ctl select {
+  padding: 5px 7px; background: var(--bg-input, #22252f);
+  border: 1px solid var(--border-input, #333); color: var(--text-primary, #e0e0e0);
+  border-radius: 4px; font-size: 0.8rem; font-family: ui-monospace, monospace;
+}
+.sv-log-ctl select:focus { outline: none; border-color: var(--accent, #6c8cff); }
+.sv-log-count { margin-left: auto; font-size: 0.75rem; font-variant-numeric: tabular-nums; }
+
+/* The stream: monospace, whitespace preserved, and it scrolls SIDEWAYS
+   rather than wrapping — a broken-up traceback or argv line is unreadable. */
+.sv-log-scroll {
+  flex: 1 1 auto; overflow: auto; background: var(--bg-sunken, #0a0c10);
+  padding: 8px 0; overscroll-behavior: contain;
+}
+.sv-log-lines {
+  display: block; min-width: min-content;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.74rem; line-height: 1.55;
+}
+.sv-log-line { display: flex; gap: 10px; padding: 0 14px; white-space: pre; }
+.sv-log-line:hover { background: var(--row-hover, #2a2d3a); }
+/* The node tag stays pinned while the line scrolls under it. */
+.sv-log-tag {
+  position: sticky; left: 0; flex: 0 0 auto; width: 76px;
+  text-align: right; color: var(--sv-log-c0); font-weight: 600;
+  background: var(--bg-sunken, #0a0c10);
+  overflow: hidden; text-overflow: ellipsis;
+}
+.sv-log-line:hover .sv-log-tag { background: var(--row-hover, #2a2d3a); }
+.sv-log-c0 .sv-log-tag { color: var(--sv-log-c0); }
+.sv-log-c1 .sv-log-tag { color: var(--sv-log-c1); }
+.sv-log-c2 .sv-log-tag { color: var(--sv-log-c2); }
+.sv-log-c3 .sv-log-tag { color: var(--sv-log-c3); }
+.sv-log-c4 .sv-log-tag { color: var(--sv-log-c4); }
+.sv-log-c5 .sv-log-tag { color: var(--sv-log-c5); }
+.sv-log-text { flex: 1 1 auto; white-space: pre; color: var(--text-primary, #e0e0e0); }
+.sv-log-msg { padding: 14px 16px; font-size: 0.85rem; line-height: 1.5; }
+.sv-log-msg code { font-family: ui-monospace, monospace; }
+
+.sv-log-jump {
+  position: absolute; left: 50%; bottom: 54px; transform: translateX(-50%);
+  background: var(--accent, #6c8cff); color: #fff; border: none; border-radius: 999px;
+  padding: 6px 16px; font-size: 0.76rem; cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+}
+.sv-log-jump[hidden] { display: none; }
+
+.sv-log-foot {
+  padding: 8px 16px; border-top: 1px solid var(--border-card, #2a2d37);
+  font-size: 0.72rem; white-space: nowrap; overflow-x: auto;
+}
+
 /* ---- narrow screens (readable at ~400px) ------------------------------ */
 @media (max-width: 820px) {
   .sv-card { padding: 14px; }
@@ -204,4 +326,14 @@
   .sv-actions .btn { flex: 1 1 auto; }
   .sv-layout-row { gap: 8px; }
   .sv-kpi-val { font-size: 1.25rem; }
+  /* Instances table: Logs + Stop stack rather than squeeze. */
+  .sv-row-actions { justify-content: flex-start; }
+  /* Log viewer goes full-bleed — a modal sheet with margins wastes the
+     little height a phone has, and the stream is the whole point. */
+  .sv-log-overlay { padding: 0; }
+  .sv-log-panel { width: 100%; height: 100%; border-radius: 0; border: none; }
+  .sv-log-controls { gap: 6px; }
+  .sv-log-count { margin-left: 0; flex: 1 1 100%; }
+  .sv-log-tag { width: 54px; }
+  .sv-log-lines { font-size: 0.7rem; }
 }

@@ -952,13 +952,22 @@ class ChatRequest(BaseModel):
 @app.post("/api/chat")
 async def api_chat(req: ChatRequest):
     mgr = _instances.get(req.instance_id)
-    if not mgr:
-        return JSONResponse(status_code=404, content={"error": "Instance not found"})
-    if mgr.state != State.RUNNING:
-        return JSONResponse(status_code=409, content={"error": f"Instance is {mgr.state.value}, not running"})
-
-    port = mgr.config.port
-    model = mgr.config.served_model_name or mgr.config.model
+    host = "127.0.0.1"
+    if mgr is None:
+        # Not a legacy local instance — it may be one the control plane launched,
+        # whose OpenAI endpoint lives on that instance's head node.
+        ep = cluster_hub.instance_endpoint(req.instance_id) if cluster_hub else None
+        if not ep or not ep.get("port"):
+            return JSONResponse(status_code=404, content={"error": "Instance not found"})
+        host = ep.get("host") or host
+        port = ep["port"]
+        model = ep.get("model") or req.instance_id
+    else:
+        if mgr.state != State.RUNNING:
+            return JSONResponse(status_code=409,
+                                content={"error": f"Instance is {mgr.state.value}, not running"})
+        port = mgr.config.port
+        model = mgr.config.served_model_name or mgr.config.model
 
     payload = {
         "model": model,
@@ -973,7 +982,7 @@ async def api_chat(req: ChatRequest):
     async with httpx.AsyncClient(timeout=120) as client:
         try:
             resp = await client.post(
-                f"http://localhost:{port}/v1/chat/completions",
+                f"http://{host}:{port}/v1/chat/completions",
                 json=payload,
             )
             return JSONResponse(content=resp.json(), status_code=resp.status_code)

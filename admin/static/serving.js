@@ -24,7 +24,19 @@
  *       with each node's `instances[]` in GET /api/cluster/nodes. Stop ->
  *       POST /api/cluster/stop { instance_id, ray: true } (docs/04: ray:true is
  *       the default teardown — it bounces the Ray runtime and avoids the
- *       placement-group leak).
+ *       placement-group leak). Every row also has a Logs button -> (E).
+ *   (E) CLUSTER LOG VIEWER — a modal over GET /api/cluster/logs that tails one
+ *       instance's output from EVERY node running it, node-tagged and merged.
+ *       A distributed launch fails on whichever node it fails on, and until
+ *       this the only way to see that was to shell into a container: the real
+ *       case that motivated it is a launch that hangs forever on
+ *       `ray_utils.py: The number of required GPUs exceeds the total number of
+ *       available GPUs` + endless `Waiting for creating a placement group`,
+ *       which is invisible from the instance table alone. Follow/live polls
+ *       every 2s, tail size 200/500/2000, per-node filter, Copy. It opens
+ *       automatically on Launch so a coming-up (or failing) instance is
+ *       watched live — see attachLogsToLaunch() for how the brand-new
+ *       instance id is discovered.
  *
  * ---------------------------------------------------------------------------
  * ENTRY POINT
@@ -67,6 +79,13 @@
  *   node's effective config — the form says so inline.
  *
  *   POST /api/cluster/stop     { instance_id: "instance-1", ray: true }
+ *   GET  /api/cluster/logs?instance=<id>&tail=<n>[&node=<node_id>]
+ *     -> { ok, instance_id, state, model,
+ *          nodes: { "<node_id>": { ok, path, lines: [...] } },
+ *          merged: [ { node_id, line }, ... ] }
+ *     A node with nothing written yet answers ok:true / lines:[] /
+ *     detail:"no log yet"; a node that could not be reached answers ok:false
+ *     with an error — both are shown, never hidden.
  *   POST /api/download         { repo_id: "org/model" }  (+ revision when typed)
  *   POST /api/models/delete    { model: "<model name>" }
  *
@@ -250,6 +269,29 @@
     planError: '',
     planBusy: false,
     launchBusy: false,
+
+    // (E) log viewer
+    logs: {
+      open: false,
+      instanceId: null,              // null while waiting for a launch to name one
+      pending: false,                // launch submitted, instance id not known yet
+      pendingNote: '',
+      follow: true,                  // live: poll every 2s
+      tail: 500,
+      nodeFilter: '',                // '' = all nodes
+      data: null,                    // last /api/cluster/logs body
+      status: 'idle',                // idle | loading | ok | unavailable | error
+      detail: '',
+      busy: false,                   // a fetch is in flight
+      stick: true,                   // auto-scroll armed (false once the user scrolls up)
+      unseen: false,                 // new output arrived while un-stuck
+      sig: '',                       // last rendered line signature
+      nodeSig: '',                   // last rendered node-filter option set
+      timer: null,                   // follow poll
+      attachTimer: null,             // "which instance did my launch create?" poll
+      attachUntil: 0,
+      knownIds: null,                // instance ids that existed before the launch
+    },
   };
 
   /* =======================================================================
@@ -344,7 +386,46 @@
           '<span class="muted"><code>GET /api/cluster/summary</code> + per-node <code>instances[]</code></span>' +
         '</div>' +
         '<div id="sv-instances"><div class="banner banner-empty">Loading instances&hellip;</div></div>' +
-      '</section>';
+      '</section>' +
+
+      // ---- (E) log viewer (modal, hidden until opened) -------------------
+      // Built once and kept in the DOM: the controls the user touches (follow,
+      // tail, node filter) must never be re-created by a poll, or a click
+      // would land on a replaced element. Only the header readout and the
+      // line list are redrawn.
+      '<div class="sv-log-overlay" id="sv-log-modal" hidden>' +
+        '<div class="sv-log-backdrop" data-act="log-close"></div>' +
+        '<div class="sv-log-panel" role="dialog" aria-modal="true" aria-label="Instance logs">' +
+          '<div class="sv-log-head">' +
+            '<div class="sv-log-title">' +
+              '<span class="sv-log-id mono" id="sv-log-id">&mdash;</span>' +
+              '<span id="sv-log-state"></span>' +
+              '<span class="muted sv-log-model mono" id="sv-log-model"></span>' +
+            '</div>' +
+            '<button class="btn btn-neutral sv-log-x" data-act="log-close" title="Close (Esc)">Close</button>' +
+          '</div>' +
+          '<div class="sv-log-nodes chip-row" id="sv-log-nodebar"></div>' +
+          '<div class="sv-log-controls">' +
+            '<button class="btn btn-save sv-log-follow" data-act="log-follow" id="sv-log-follow" aria-pressed="true">&#9679; Following</button>' +
+            '<label class="sv-log-ctl"><span class="muted">tail</span>' +
+              '<select id="sv-log-tail">' +
+                '<option value="200">200</option>' +
+                '<option value="500" selected>500</option>' +
+                '<option value="2000">2000</option>' +
+              '</select></label>' +
+            '<label class="sv-log-ctl"><span class="muted">node</span>' +
+              '<select id="sv-log-node"><option value="">All nodes</option></select></label>' +
+            '<button class="btn btn-neutral" data-act="log-refresh" id="sv-log-refresh">Refresh</button>' +
+            '<button class="btn btn-neutral" data-act="log-copy">Copy</button>' +
+            '<span class="muted sv-log-count" id="sv-log-count"></span>' +
+          '</div>' +
+          '<div class="sv-log-scroll" id="sv-log-scroll" tabindex="0">' +
+            '<div class="sv-log-lines" id="sv-log-lines"></div>' +
+          '</div>' +
+          '<button class="sv-log-jump" data-act="log-jump" id="sv-log-jump" hidden>&darr; new output &mdash; jump to latest</button>' +
+          '<div class="sv-log-foot muted" id="sv-log-foot"></div>' +
+        '</div>' +
+      '</div>';
   }
 
   function el(id) { return root ? root.querySelector('#' + id) : null; }
@@ -966,13 +1047,40 @@
     if (!body.model) { showToast('Select a model first', 'warning'); return; }
 
     state.launchBusy = true; renderLayout();
+
+    /* Open the viewer BEFORE the POST and start looking for the instance it
+     * creates — the POST does not return until every node has finished
+     * starting (minutes for a large model), and everything worth seeing
+     * happens in that window. See startAttachTimer() for the two prongs:
+     * the id in the eventual POST response, and the id that appears in
+     * GET /api/cluster/nodes seconds after the control plane registers it. */
+    var before = knownInstanceIds();
+    openLogs(null, {
+      pending: true,
+      follow: true,
+      note: body.model + ' on ' + body.node_ids.join(', '),
+    });
+    startAttachTimer(before);
+
     var r = MOCK ? mockLaunch(body) : await post('/api/cluster/launch', body, true);
     state.launchBusy = false;
     if (!r.ok) {
       showToast('Launch failed: ' + (r.error || 'unknown error'), 'error');
+      // Keep the viewer open if it managed to attach — the logs say WHY.
+      if (state.logs.open && !state.logs.instanceId) {
+        stopAttachTimer();
+        state.logs.pending = false;
+        state.logs.pendingNote = '';
+        state.logs.status = 'error';
+        state.logs.detail = r.error || 'launch failed';
+        state.logs.sig = '';
+        renderLogs();
+      }
     } else {
       var rid = (r.data && r.data.instance_id) || 'instance';
       showToast('Launched ' + rid + ' — ' + body.model + ' on ' + body.node_ids.join(', '), 'success');
+      // Prong 1: the authoritative id, if the attach poll has not found it.
+      if (r.data && r.data.instance_id) attachLogs(r.data.instance_id);
       if (MOCK) { mockTick(); renderAll(); } else { poll(); }
     }
     renderLayout();
@@ -1097,14 +1205,18 @@
         '<td><span class="badge state-badge ' + instanceStateClass(st) + '"><span class="state-dot"></span>' + esc(st) + '</span></td>' +
         '<td><div class="chip-row">' + nodes + '</div></td>' +
         '<td class="mono">' + (r.port ? ':' + esc(r.port) : '—') + '</td>' +
-        '<td class="num"><button class="btn btn-danger" data-act="stop-instance" data-instance="' + esc(r.id) + '">Stop</button></td>' +
+        '<td class="num"><div class="sv-row-actions">' +
+          '<button class="btn btn-neutral" data-act="logs-instance" data-instance="' + esc(r.id) + '">Logs</button>' +
+          '<button class="btn btn-danger" data-act="stop-instance" data-instance="' + esc(r.id) + '">Stop</button>' +
+        '</div></td>' +
       '</tr>';
     }).join('');
 
     host.innerHTML = '<div class="table-wrap"><table class="summary-table">' +
       '<thead><tr><th>Instance</th><th>State</th><th>Nodes</th><th>Port</th><th class="num">Actions</th></tr></thead>' +
       '<tbody>' + rows + '</tbody></table></div>' +
-      '<div class="muted sv-legend">Stop sends <code>{ instance_id, ray: true }</code> — bouncing the Ray runtime with the instance is the default teardown (docs/04: it avoids the placement-group leak).</div>';
+      '<div class="muted sv-legend"><strong>Logs</strong> tails this instance on every node that runs it (<code>GET /api/cluster/logs</code>) — the only place a multi-node failure is visible. ' +
+      'Stop sends <code>{ instance_id, ray: true }</code> — bouncing the Ray runtime with the instance is the default teardown (docs/04: it avoids the placement-group leak).</div>';
   }
 
   function instanceStateClass(st) {
@@ -1125,6 +1237,440 @@
     if (!r.ok) { showToast('Stop failed: ' + r.error, 'error'); return; }
     showToast('Stopped ' + rid, 'success');
     poll();
+  }
+
+  /* =======================================================================
+   * (E) CLUSTER LOG VIEWER
+   *
+   * One instance, every node that runs it, merged and node-tagged:
+   *   GET /api/cluster/logs?instance=<id>&tail=<n>
+   *
+   * The per-node filter is applied CLIENT-SIDE even though the endpoint takes
+   * &node=<node_id>: the response already carries every node, so flipping the
+   * filter is instant and never loses the other nodes' backlog. The tail size
+   * does go to the server (it is what bounds the read).
+   * ===================================================================== */
+
+  var LOG_POLL_MS = 2000;
+  var LOG_COLOURS = 6;               // sv-log-c0 … sv-log-c5 in serving.css
+
+  // Node ids are long ("covid-a1b2"); the tag shows the hostname when the
+  // cluster poll knows it, so head vs worker reads at a glance.
+  function logNodeLabel(nodeId) {
+    var id = String(nodeId == null ? '' : nodeId);
+    var n = state.nodes.find(function (x) { return x.node_id === id; });
+    if (n) return nodeName(n);
+    return id || 'unknown';
+  }
+
+  // Stable colour per node: index into the sorted node key list of THIS
+  // response, so covid is always one colour and ebola another.
+  function logNodeKeys() {
+    var d = state.logs.data;
+    var keys = d && d.nodes ? Object.keys(d.nodes) : [];
+    if (!keys.length && d && Array.isArray(d.merged)) {
+      d.merged.forEach(function (m) {
+        if (m && m.node_id && keys.indexOf(m.node_id) === -1) keys.push(m.node_id);
+      });
+    }
+    return keys.slice().sort();
+  }
+
+  function logNodeColour(nodeId) {
+    var i = logNodeKeys().indexOf(String(nodeId));
+    return 'sv-log-c' + (i < 0 ? 0 : (i % LOG_COLOURS));
+  }
+
+  /* Log lines are raw process output: strip ANSI colour codes and any other
+   * C0 control characters (tab survives) so nothing can corrupt the markup. */
+  var ANSI_RE = new RegExp(String.fromCharCode(27) + '\\[[0-9;?]*[ -\\/]*[@-~]', 'g');
+
+  function cleanLogLine(s) {
+    var str = String(s == null ? '' : s).replace(ANSI_RE, '');
+    var out = '';
+    for (var i = 0; i < str.length; i++) {
+      var c = str.charCodeAt(i);
+      if (c === 9) { out += '    '; continue; }          // tab -> spaces
+      if (c < 32 || c === 127) continue;                 // drop every other C0
+      out += str.charAt(i);
+    }
+    return out;
+  }
+
+  // The lines currently on screen, after the node filter.
+  function logEntries() {
+    var d = state.logs.data;
+    if (!d) return [];
+    var list = [];
+    if (Array.isArray(d.merged) && d.merged.length) {
+      list = d.merged.map(function (m) {
+        return { node_id: (m && m.node_id) || '', line: (m && m.line) || '' };
+      });
+    } else {
+      var nodes = (d && d.nodes) || {};
+      Object.keys(nodes).forEach(function (nid) {
+        (((nodes[nid] || {}).lines) || []).forEach(function (line) {
+          list.push({ node_id: nid, line: line });
+        });
+      });
+    }
+    var f = state.logs.nodeFilter;
+    if (f) list = list.filter(function (e) { return e.node_id === f; });
+    return list;
+  }
+
+  function openLogs(instanceId, opts) {
+    var L = state.logs;
+    opts = opts || {};
+    var changed = L.instanceId !== instanceId;
+    L.open = true;
+    L.instanceId = instanceId || null;
+    L.pending = !!opts.pending;
+    L.pendingNote = opts.note || '';
+    if (opts.follow != null) L.follow = !!opts.follow;
+    if (changed) {
+      L.data = null; L.status = instanceId ? 'loading' : 'idle';
+      L.detail = ''; L.sig = ''; L.nodeSig = '';
+      L.nodeFilter = ''; L.stick = true; L.unseen = false;
+    }
+    var modal = el('sv-log-modal');
+    if (modal) modal.hidden = false;
+    var nodeSel = el('sv-log-node');
+    if (nodeSel && changed) nodeSel.value = '';
+    syncFollowButton();
+    renderLogs();
+    document.addEventListener('keydown', onLogKeydown);
+    if (L.instanceId) fetchLogs();
+    startLogTimer();
+  }
+
+  function closeLogs() {
+    var L = state.logs;
+    L.open = false;
+    L.pending = false;
+    stopLogTimer();
+    stopAttachTimer();
+    document.removeEventListener('keydown', onLogKeydown);
+    var modal = el('sv-log-modal');
+    if (modal) modal.hidden = true;
+  }
+
+  function onLogKeydown(ev) {
+    if (ev.key === 'Escape' && state.logs.open) closeLogs();
+  }
+
+  function startLogTimer() {
+    stopLogTimer();
+    if (!state.logs.follow) return;
+    state.logs.timer = setInterval(function () {
+      if (!state.logs.open) { stopLogTimer(); return; }
+      if (state.logs.instanceId) fetchLogs();
+    }, LOG_POLL_MS);
+  }
+
+  function stopLogTimer() {
+    if (state.logs.timer) { clearInterval(state.logs.timer); state.logs.timer = null; }
+  }
+
+  function syncFollowButton() {
+    var b = el('sv-log-follow');
+    if (!b) return;
+    var on = state.logs.follow;
+    b.textContent = on ? '● Following' : '■ Paused';
+    b.className = 'btn sv-log-follow ' + (on ? 'btn-save' : 'btn-neutral');
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    var r = el('sv-log-refresh');
+    if (r) r.disabled = on;
+  }
+
+  async function fetchLogs() {
+    var L = state.logs;
+    if (!L.open || !L.instanceId || L.busy) return;
+    L.busy = true;
+    if (L.status === 'idle') L.status = 'loading';
+    try {
+      if (MOCK) {
+        L.data = mockLogs(L.instanceId, L.tail);
+        L.status = 'ok'; L.detail = '';
+      } else {
+        var url = '/api/cluster/logs?instance=' + encodeURIComponent(L.instanceId) +
+          '&tail=' + encodeURIComponent(L.tail);
+        var res = await apiFetch(url);
+        if (res.status === 404) {
+          L.status = 'unavailable'; L.detail = '';
+        } else if (!res.ok) {
+          L.status = 'error'; L.detail = 'HTTP ' + res.status;
+        } else {
+          var d = await res.json();
+          if (d && d.ok === false) {
+            L.status = 'error'; L.detail = d.error || 'request failed';
+          } else {
+            L.data = d; L.status = 'ok'; L.detail = '';
+          }
+        }
+      }
+    } catch (e) {
+      L.status = 'error';
+      L.detail = (e && e.message) || 'request failed';
+    }
+    L.busy = false;
+    renderLogs();
+  }
+
+  function renderLogs() {
+    var L = state.logs;
+    if (!L.open) return;
+    var host = el('sv-log-lines');
+    if (!host) return;
+
+    var d = L.data || {};
+    // ---- header readout ------------------------------------------------
+    var idEl = el('sv-log-id');
+    if (idEl) idEl.textContent = L.instanceId || (L.pending ? 'starting…' : '—');
+    var stEl = el('sv-log-state');
+    if (stEl) {
+      var st = String(d.state || (L.pending ? 'STARTING' : '')).toUpperCase();
+      stEl.innerHTML = st
+        ? '<span class="badge state-badge ' + instanceStateClass(st) + '"><span class="state-dot"></span>' + esc(st) + '</span>'
+        : '';
+    }
+    var mdEl = el('sv-log-model');
+    if (mdEl) mdEl.textContent = d.model ? String(d.model) : '';
+
+    renderLogNodeBar();
+
+    // ---- body ----------------------------------------------------------
+    if (L.status === 'unavailable') {
+      host.innerHTML = '<div class="sv-log-msg muted">Log viewer unavailable on this control plane ' +
+        '&mdash; it does not expose <code>GET /api/cluster/logs</code>.</div>';
+      L.sig = 'unavailable';
+      setLogFoot('');
+      setLogCount('');
+      return;
+    }
+
+    var entries = logEntries();
+    var sig = [L.status, L.nodeFilter, entries.length,
+               entries.length ? entries[entries.length - 1].line : ''].join('|');
+
+    if (sig !== L.sig) {
+      if (!entries.length) {
+        var msg;
+        if (L.pending) {
+          msg = 'Launch submitted &mdash; waiting for the control plane to register the instance&hellip;' +
+            (L.pendingNote ? '<div class="muted">' + L.pendingNote + '</div>' : '');
+        } else if (L.status === 'loading') {
+          msg = 'Loading&hellip;';
+        } else if (L.status === 'error') {
+          msg = 'Could not read logs' + (L.detail ? ' &mdash; ' + esc(L.detail) : '') + '.';
+        } else if (L.nodeFilter) {
+          msg = 'No output from <span class="mono">' + esc(logNodeLabel(L.nodeFilter)) + '</span> yet.';
+        } else {
+          msg = 'Waiting for output&hellip; <span class="muted">(normal for the first seconds of a launch)</span>';
+        }
+        host.innerHTML = '<div class="sv-log-msg muted">' + msg + '</div>';
+      } else {
+        host.innerHTML = entries.map(function (e) {
+          return '<div class="sv-log-line ' + logNodeColour(e.node_id) + '">' +
+            '<span class="sv-log-tag">' + esc(logNodeLabel(e.node_id)) + '</span>' +
+            '<span class="sv-log-text">' + esc(cleanLogLine(e.line)) + '</span>' +
+          '</div>';
+        }).join('');
+      }
+      // New output while the user has scrolled up: flag it, never yank.
+      if (L.sig && L.sig !== sig && !L.stick && entries.length) L.unseen = true;
+      L.sig = sig;
+      if (L.stick) scrollLogsToBottom();
+    }
+    syncJumpButton();
+
+    setLogCount(entries.length
+      ? entries.length + ' line' + (entries.length === 1 ? '' : 's') +
+        (L.nodeFilter ? ' · ' + logNodeLabel(L.nodeFilter) : ' · all nodes')
+      : '');
+
+    // Footer: log paths per node + any transport error on the request itself.
+    var foot = [];
+    var nodes = d.nodes || {};
+    Object.keys(nodes).forEach(function (nid) {
+      var v = nodes[nid] || {};
+      if (v.path) foot.push(esc(logNodeLabel(nid)) + ': <span class="mono">' + esc(v.path) + '</span>');
+    });
+    if (L.status === 'error' && L.detail && entries.length) {
+      foot.unshift('<span class="sv-bad">last refresh failed: ' + esc(L.detail) + '</span>');
+    }
+    setLogFoot(foot.join(' · '));
+  }
+
+  function setLogCount(txt) {
+    var c = el('sv-log-count');
+    if (c) c.textContent = txt;
+  }
+
+  function setLogFoot(html) {
+    var f = el('sv-log-foot');
+    if (f) f.innerHTML = html;
+  }
+
+  /* Which nodes are reporting — and, crucially, which are NOT: a node that
+   * answered ok:false shows its error here instead of silently vanishing, and
+   * one with nothing written yet says so. */
+  function renderLogNodeBar() {
+    var bar = el('sv-log-nodebar');
+    if (!bar) return;
+    var d = state.logs.data || {};
+    var nodes = d.nodes || {};
+    var keys = Object.keys(nodes);
+    if (!keys.length) {
+      bar.innerHTML = state.logs.pending
+        ? '<span class="muted">no node is reporting this instance yet</span>' : '';
+    } else {
+      bar.innerHTML = keys.map(function (nid) {
+        var v = nodes[nid] || {};
+        var lines = (v.lines || []).length;
+        var cls = 'chip sv-log-chip ' + logNodeColour(nid);
+        if (v.ok === false) {
+          return '<span class="' + cls + ' sv-log-chip-bad" title="' + esc(v.error || 'node error') + '">' +
+            esc(logNodeLabel(nid)) + ' <span class="dim">' + esc(v.error || 'unreachable') + '</span></span>';
+        }
+        var note = lines ? lines + ' lines' : (v.detail || 'no log yet');
+        return '<span class="' + cls + '">' + esc(logNodeLabel(nid)) +
+          ' <span class="dim">' + esc(note) + '</span></span>';
+      }).join('');
+    }
+    // Keep the filter <select> in step with the nodes actually present.
+    var sel = el('sv-log-node');
+    if (!sel) return;
+    var sig = keys.join(',');
+    if (sig === state.logs.nodeSig) return;
+    state.logs.nodeSig = sig;
+    var cur = state.logs.nodeFilter;
+    sel.innerHTML = '<option value="">All nodes</option>' + keys.map(function (nid) {
+      return '<option value="' + esc(nid) + '"' + (nid === cur ? ' selected' : '') + '>' +
+        esc(logNodeLabel(nid)) + '</option>';
+    }).join('');
+    if (keys.indexOf(cur) === -1) { state.logs.nodeFilter = ''; sel.value = ''; }
+  }
+
+  function scrollLogsToBottom() {
+    var sc = el('sv-log-scroll');
+    if (!sc) return;
+    sc.scrollTop = sc.scrollHeight;
+    state.logs.stick = true;
+    state.logs.unseen = false;
+    syncJumpButton();
+  }
+
+  function syncJumpButton() {
+    var b = el('sv-log-jump');
+    if (b) b.hidden = !(state.logs.unseen && !state.logs.stick);
+  }
+
+  /* Auto-scroll is armed only while the view is already at the bottom. Scroll
+   * up and it disarms — the poll keeps running, the text stays put, and the
+   * "jump to latest" button appears. */
+  function onLogScroll(ev) {
+    var sc = ev.currentTarget;
+    var atBottom = (sc.scrollHeight - sc.scrollTop - sc.clientHeight) < 24;
+    state.logs.stick = atBottom;
+    if (atBottom) state.logs.unseen = false;
+    syncJumpButton();
+  }
+
+  function onLogCopy() {
+    var entries = logEntries();
+    if (!entries.length) { showToast('Nothing to copy yet', 'warning'); return; }
+    var text = entries.map(function (e) {
+      return '[' + logNodeLabel(e.node_id) + '] ' + cleanLogLine(e.line);
+    }).join('\n');
+    copyText(text).then(function (ok) {
+      showToast(ok ? ('Copied ' + entries.length + ' lines') : 'Copy failed — select the text instead',
+        ok ? 'success' : 'error');
+    });
+  }
+
+  /* navigator.clipboard is unavailable on insecure origins (and on the file://
+   * preview), so fall back to the old textarea + execCommand path. */
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).then(function () { return true; },
+        function () { return legacyCopy(text); });
+    }
+    return Promise.resolve(legacyCopy(text));
+  }
+
+  function legacyCopy(text) {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '-1000px';
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    } catch (e) { return false; }
+  }
+
+  /* ---- attaching the viewer to a brand-new instance ----------------------
+   * STRATEGY (two-pronged, because POST /api/cluster/launch does not answer
+   * until every node has finished starting — minutes, for a big model):
+   *
+   *   1. The POST's own response is authoritative when it eventually lands:
+   *      it carries `instance_id`, so onLaunch() attaches with it if the
+   *      viewer has not attached already.
+   *   2. Long before that, the control plane has already REGISTERED the
+   *      instance (hub.launch() writes it as STARTING before it sends a
+   *      single node command), so its id shows up in GET /api/cluster/nodes
+   *      (per-node `instances[]`) and in GET /api/cluster/summary
+   *      (`instances` map) within a poll or two. We snapshot the set of known
+   *      instance ids immediately BEFORE the POST, then poll the cluster
+   *      every 1.5s and attach to the first id that was not in that snapshot.
+   *
+   * Prong 2 is what normally wins, which is the point: the user watches the
+   * instance come up (or hang on a placement group) while the POST is still
+   * in flight. The attach poll gives up after 5 minutes, or as soon as the
+   * viewer is closed. */
+  function knownInstanceIds() {
+    var s = new Set();
+    collectInstances().forEach(function (r) { s.add(r.id); });
+    return s;
+  }
+
+  function startAttachTimer(before) {
+    stopAttachTimer();
+    var L = state.logs;
+    L.knownIds = before;
+    L.attachUntil = Date.now() + 5 * 60 * 1000;
+    L.attachTimer = setInterval(async function () {
+      if (!state.logs.open || state.logs.instanceId) { stopAttachTimer(); return; }
+      if (Date.now() > state.logs.attachUntil) {
+        stopAttachTimer();
+        state.logs.pendingNote = 'No new instance appeared in 5 minutes — the launch may have been rejected.';
+        renderLogs();
+        return;
+      }
+      if (!MOCK) await loadCluster();
+      renderInstances();
+      var fresh = null;
+      collectInstances().forEach(function (r) {
+        if (!state.logs.knownIds.has(r.id) && !fresh) fresh = r.id;
+      });
+      if (fresh) { stopAttachTimer(); attachLogs(fresh); }
+    }, 1500);
+  }
+
+  function stopAttachTimer() {
+    if (state.logs.attachTimer) { clearInterval(state.logs.attachTimer); state.logs.attachTimer = null; }
+  }
+
+  function attachLogs(instanceId) {
+    if (!instanceId || !state.logs.open) return;
+    if (state.logs.instanceId === instanceId) return;
+    stopAttachTimer();
+    openLogs(instanceId, { follow: true });
   }
 
   /* =======================================================================
@@ -1162,6 +1708,18 @@
     else if (act === 'preview') { ev.preventDefault(); onPreview(); }
     else if (act === 'launch') { ev.preventDefault(); onLaunch(); }
     else if (act === 'stop-instance') { ev.preventDefault(); onStopInstance(t.dataset.instance); }
+    else if (act === 'logs-instance') { ev.preventDefault(); openLogs(t.dataset.instance, { follow: true }); }
+    else if (act === 'log-close') { ev.preventDefault(); closeLogs(); }
+    else if (act === 'log-copy') { ev.preventDefault(); onLogCopy(); }
+    else if (act === 'log-refresh') { ev.preventDefault(); fetchLogs(); }
+    else if (act === 'log-jump') { ev.preventDefault(); scrollLogsToBottom(); }
+    else if (act === 'log-follow') {
+      ev.preventDefault();
+      state.logs.follow = !state.logs.follow;
+      syncFollowButton();
+      if (state.logs.follow) { scrollLogsToBottom(); fetchLogs(); startLogTimer(); }
+      else stopLogTimer();
+    }
     else if (act === 'clear-sel') {
       ev.preventDefault();
       state.selected.clear();
@@ -1203,6 +1761,18 @@
       renderLayout();
     } else if (t.id === 'sv-model') {
       renderLayout();            // Launch is gated on a model being chosen
+    } else if (t.id === 'sv-log-tail') {
+      // tail is a server-side bound — refetch.
+      state.logs.tail = parseInt(t.value, 10) || 500;
+      state.logs.sig = '';
+      state.logs.stick = true;
+      fetchLogs();
+    } else if (t.id === 'sv-log-node') {
+      // the node filter is client-side — the response already has every node.
+      state.logs.nodeFilter = String(t.value || '');
+      state.logs.sig = '';
+      state.logs.stick = true;
+      renderLogs();
     }
   }
 
@@ -1400,6 +1970,79 @@
     return { ok: true, data: { ok: true, instance_id: rid, layout: p.data.layout } };
   }
 
+  /* A stand-in for GET /api/cluster/logs, so the viewer can be reviewed with no
+   * backend: two nodes, node-tagged, plus a "Waiting for creating a placement
+   * group" line that repeats on every 2s poll — which is exactly the real
+   * failure this viewer was built for (a launch that hangs forever because
+   * ray_utils cannot satisfy the placement group). Follow, the node filter and
+   * Copy are all visibly live against it.
+   *
+   * A freshly launched mock instance walks through the three states the real
+   * endpoint produces, one after another, so none of them needs contriving:
+   *   polls 1-2   ebola -> ok:true, lines:[], detail "no log yet"
+   *   polls 3-4   ebola -> ok:false, a CCP timeout, shown inline
+   *   polls 5+    ebola -> streaming
+   * The pre-existing `devstral-r0` instance skips straight to streaming. */
+  function mockLogs(instanceId, tail) {
+    var d = mockInit();
+    d.logTicks = d.logTicks || {};
+    var tick = (d.logTicks[instanceId] = (d.logTicks[instanceId] || 0) + 1);
+    var fresh = instanceId !== 'devstral-r0';
+
+    var covid = [
+      'INFO 09-23 19:02:11 api_server.py:1032] vLLM API server version 0.10.1',
+      'INFO 09-23 19:02:11 api_server.py:1033] args: Namespace(model=\'/models/Devstral-Small-2507\', tensor_parallel_size=2, pipeline_parallel_size=2, distributed_executor_backend=\'ray\', enforce_eager=True)',
+      'INFO 09-23 19:02:12 ray_utils.py:284] Starting Ray head at 172.16.254.201:6379 (NCCL_IB_HCA=mlx4_0:1, NCCL_IB_GID_INDEX=3)',
+      'INFO 09-23 19:02:18 ray_utils.py:212] Ray cluster ready: 2 nodes, 3 GPUs visible',
+      'ERROR 09-23 19:02:19 ray_utils.py:236] The number of required GPUs exceeds the total number of available GPUs in the placement group.',
+    ];
+    for (var i = 0; i < tick + 1; i++) {
+      covid.push('INFO 09-23 19:02:' + String(20 + i * 10).slice(-2) +
+        ' ray_utils.py:242] Waiting for creating a placement group of specs for ' +
+        ((i + 1) * 10) + ' seconds. specs=[{\'node:172.16.254.201\': 0.001, \'GPU\': 1.0}, {\'GPU\': 1.0}]. ' +
+        'Check `ray status` to see if you have enough resources, and make sure the IP addresses are correct.');
+    }
+
+    var ebola = [
+      'INFO 09-23 19:02:16 ray_worker.py:88] joining Ray head 172.16.254.201:6379 over enp196s0',
+      'INFO 09-23 19:02:16 ray_worker.py:94] RoCE fabric up — GID index 3, mlx4_0:1',
+      'WARNING 09-23 19:02:18 ray_worker.py:121] only 1 of 2 GPUs free on this node (GPU 0 is held by instance devstral-r0)',
+      'INFO 09-23 19:02:21 ray_worker.py:130] registered with the Ray cluster; 1 GPU offered',
+    ];
+    for (var j = 0; j < tick; j++) {
+      ebola.push('INFO 09-23 19:02:' + String(25 + j * 10).slice(-2) +
+        ' ray_utils.py:242] Waiting for creating a placement group of specs for ' +
+        ((j + 1) * 10) + ' seconds.');
+    }
+
+    var nodes = {
+      'covid-a1b2': { ok: true, path: '/models/.vllm-manager/logs/' + instanceId + '.log', lines: covid.slice(-tail) },
+    };
+    if (fresh && tick <= 2) {
+      nodes['ebola-c3d4'] = { ok: true, path: null, lines: [], detail: 'no log yet' };
+    } else if (fresh && tick <= 4) {
+      nodes['ebola-c3d4'] = { ok: false, error: 'node did not answer within 20s (CCP timeout)' };
+    } else {
+      nodes['ebola-c3d4'] = { ok: true, path: '/models/.vllm-manager/logs/' + instanceId + '.log', lines: ebola.slice(-tail) };
+    }
+
+    // The real hub appends node by node, in its own target order — mirror that
+    // rather than inventing a global timestamp sort the backend does not do.
+    var merged = [];
+    Object.keys(nodes).forEach(function (nid) {
+      (nodes[nid].lines || []).forEach(function (line) { merged.push({ node_id: nid, line: line }); });
+    });
+
+    return {
+      ok: true,
+      instance_id: instanceId,
+      state: d.instanceStates[instanceId] || 'STARTING',
+      model: '/models/Devstral-Small-2507',
+      nodes: nodes,
+      merged: merged,
+    };
+  }
+
   function mockStopInstance(rid) {
     var d = mockInit();
     delete d.instanceStates[rid];
@@ -1429,6 +2072,13 @@
         onDownload();
       }
     });
+
+    // Log viewer: the scroll container owns "is the user at the bottom?".
+    var sc = el('sv-log-scroll');
+    if (sc) sc.addEventListener('scroll', onLogScroll);
+    var tailSel = el('sv-log-tail');
+    if (tailSel) tailSel.value = String(state.logs.tail);
+    syncFollowButton();
 
     poll();
     if (timer) clearInterval(timer);

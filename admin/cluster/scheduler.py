@@ -24,6 +24,17 @@ def _node_ip(node) -> str:
     return (node.addresses or {}).get("mgmt", "")
 
 
+def _ray_ip(node, cfg=None) -> str:
+    """Address Ray should register this node under (control plane, not the fabric)."""
+    cfg = cfg or {}
+    if cfg.get("ray_node_ip"):
+        return str(cfg["ray_node_ip"])
+    mgmt = (node.addresses or {}).get("mgmt")
+    if mgmt:
+        return mgmt
+    return _node_ip(node)
+
+
 def _gpu_count(node) -> int:
     return len(node.gpus) or len(node.telemetry_gpus)
 
@@ -137,7 +148,13 @@ def build_instance_plan(
         weights = [_node_mem_mb(n) for n in ordered]
         pp_partition = ",".join(str(x) for x in memory_weighted_partition(weights, num_layers))
 
-    ray = {"head_addr": _node_ip(head), "port": int(head_cfg.get("ray_head_port", 6379))}
+    # Ray CONTROL traffic uses the management address, not the RDMA fabric. vLLM
+    # derives its placement-group node affinity ("node:<ip>") from the node's primary
+    # address, so if Ray registers nodes under fabric IPs the bundle can never be
+    # satisfied ("No available node types can fulfill resource request"). NCCL still
+    # rides the fabric via NCCL_SOCKET_IFNAME — this only affects Ray scheduling.
+    ray = {"head_addr": _ray_ip(head, head_cfg),
+           "port": int(head_cfg.get("ray_head_port", 6379))}
     # Executor: multi-node uses Ray; single-node multi-GPU uses mp (Ray hangs the TP forward on
     # this V100+IOMMU hardware — the v0.3.0 lesson, docs/04).
     executor = "ray" if layout["pp"] > 1 else head_cfg.get("multigpu_executor", "mp")

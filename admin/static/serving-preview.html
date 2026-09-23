@@ -31,6 +31,20 @@
          Preview/Launch disabled
        • tick covid GPU 0+1 only               -> TP 2 x PP 1, executor mp
 
+     LOG VIEWER (mock): hit "Logs" on a row in Running instances, or just
+     Launch — the viewer opens by itself in follow mode and attaches to the
+     new instance. The sample stream is the real failure it exists for: covid
+     (head) reports
+        ERROR ray_utils.py:236] The number of required GPUs exceeds the total
+                                number of available GPUs in the placement group
+     followed by a "Waiting for creating a placement group" line that repeats
+     on every 2s poll, while ebola (worker) reports its Ray join. Watch the
+     line count climb, scroll up (auto-scroll pauses and a "jump to latest"
+     pill appears), flip the node filter between All / covid / ebola, change
+     the tail size, and Copy the displayed lines. A freshly LAUNCHED mock
+     instance also walks ebola through "no log yet" -> an inline ok:false node
+     error -> streaming, so all three states can be seen without a backend.
+
      Append ?live=1 to point the same page at a real backend instead.
      ====================================================================== -->
 

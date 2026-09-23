@@ -18,10 +18,10 @@ import time
 from typing import Optional
 
 
-def _run(cmd: list, timeout: int = 60) -> tuple:
+def _run(cmd: list, timeout: int = 60, env: Optional[dict] = None) -> tuple:
     """Run a command, return (rc, stdout, stderr). Never raises on non-zero."""
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
         return p.returncode, p.stdout, p.stderr
     except FileNotFoundError as exc:
         return 127, "", str(exc)
@@ -370,6 +370,37 @@ class Runner:
             return {"ok": False, "error": tail[0]}
         return {"ok": True, "detail": f"synced {repo} -> {dest}"}
 
+    def join_ray(self, body: dict) -> dict:
+        """Bring Ray up on this node: start the head, or join an existing head.
+
+        Deliberately separate from ensure_instance. The head must exist before a
+        worker can join, and ALL workers must have joined before vLLM starts, or
+        vLLM waits forever for a placement group it can never satisfy ("required
+        GPUs exceeds available"). The admin sequences head -> workers -> serve.
+        """
+        role = body.get("role_in_instance", "head")
+        head_addr = body.get("head_addr") or ""
+        port = int(body.get("port", 6379))
+        node_ip = body.get("node_ip") or ""
+        ip_arg = ["--node-ip-address", node_ip] if node_ip else []
+        # Ray ACTORS inherit the environment of the `ray start` process, so the
+        # node's NCCL/fabric settings must be applied HERE, not just on the head's
+        # vLLM process. Without this the workers call ncclGetUniqueId with no
+        # NCCL_SOCKET_IFNAME/NCCL_IB_HCA and fail with "NCCL error: invalid usage".
+        renv = dict(os.environ)
+        renv.update({k: str(v) for k, v in (body.get("env") or {}).items()})
+        _run(["ray", "stop"], timeout=30, env=renv)
+        if role == "head":
+            cmd = ["ray", "start", "--head", "--port=%d" % port,
+                   "--disable-usage-stats"] + ip_arg
+        else:
+            cmd = ["ray", "start", "--address=%s:%d" % (head_addr, port),
+                   "--disable-usage-stats"] + ip_arg
+        rc, out, err = _run(cmd, timeout=120, env=renv)
+        if rc != 0:
+            return {"ok": False, "error": "ray %s failed: %s" % (role, (err or out).strip()[:400])}
+        return {"ok": True, "detail": "ray %s up%s" % (role, " (%s)" % node_ip if node_ip else "")}
+
     # -- instance lifecycle (Ray + vLLM) ----------------------------------
     def ensure_instance(self, body: dict) -> dict:
         rid = body["instance_id"]
@@ -396,10 +427,8 @@ class Runner:
             except FileNotFoundError as exc:
                 return {"ok": False, "error": str(exc)}
         elif role == "head":
-            _run(["ray", "stop"], timeout=30)
-            rc, _, err = _run(["ray", "start", "--head", f"--port={port}"], timeout=60)
-            if rc != 0:
-                return {"ok": False, "error": f"ray head failed: {err.strip()}"}
+            # Ray is brought up separately by join_ray (head first, then workers)
+            # so the cluster is complete before vLLM asks for its placement group.
             env["RAY_ADDRESS"] = f"{head_addr}:{port}"
             cmd = self._vllm_cmd(body, executor="ray")
             try:
@@ -408,10 +437,9 @@ class Runner:
             except FileNotFoundError as exc:
                 return {"ok": False, "error": str(exc)}
         else:
-            # worker: join the head's Ray cluster (Ray schedules the vLLM workers here)
-            rc, _, err = _run(["ray", "start", f"--address={head_addr}:{port}"], timeout=60)
-            if rc != 0:
-                return {"ok": False, "error": f"ray worker join failed: {err.strip()}"}
+            # worker: nothing to exec — join_ray already put this node in the Ray
+            # cluster, and Ray schedules the vLLM workers onto it from the head.
+            pass
 
         self._instances[rid] = {"procs": procs, "role": role, "port": body.get("port"),
                                "state": "SERVING", "executor": executor}

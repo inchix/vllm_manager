@@ -388,12 +388,11 @@ class ClusterHub:
         transport = seff.get("storage_transport", "tcp")
         results = {}
         if transport == "tcp":   # modelfsd; kernel-RDMA export is managed out of band
-            listen = seff.get("storage_listen") or (fabric_ip + ":2049")
-            results[snode.node_id] = await self.send_command(
-                snode.node_id, protocol.make_frame(protocol.SERVE_STORAGE, {
-                    "export_dir": export_dir, "listen": listen,
-                    "allow": seff.get("storage_allow") or [],
-                    "readahead": seff.get("storage_readahead")}), timeout=30)
+            # Reuse set_share rather than re-deriving listen/allow here: this path
+            # had drifted (hardcoded :2049, empty allow-list) while the checkbox
+            # path grew ephemeral ports and a cluster-scoped allow-list. One
+            # implementation, no drift.
+            results[snode.node_id] = await self.set_share(snode.node_id, export_dir, True)
         for p in participants:
             if p.node_id == snode.node_id:
                 continue  # storage host reads locally, no mount
@@ -433,9 +432,39 @@ class ClusterHub:
             "state": "STARTING", "node_ids": [n.node_id for n in nodes],
             "bodies": bodies, "layout": plan["layout"], "port": port, "model": model,
         }
-        # head last so workers are ready first
-        order = [nid for nid in plan["layout"]["ordered_ids"]][::-1]
+        ordered = list(plan["layout"]["ordered_ids"])
+        head_id = plan["layout"]["head_id"]
         results = {}
+
+        # Multi-node: Ray must be COMPLETE before vLLM starts. Head's Ray first,
+        # then every worker joins, and only then does the head exec vLLM —
+        # otherwise vLLM asks for a placement group larger than the cluster and
+        # waits forever ("required GPUs exceeds available"). Workers exec nothing;
+        # Ray schedules their vLLM workers from the head.
+        if plan["layout"]["pp"] > 1:
+            ray_port = int(bodies[head_id].get("ray", {}).get("port", 6379))
+            head_addr = bodies[head_id].get("ray", {}).get("head_addr", "")
+            for nid in ordered:                       # head first, then workers
+                node = self.registry.get(nid)
+                res = await self.send_command(nid, protocol.make_frame(protocol.JOIN_RAY, {
+                    "role_in_instance": "head" if nid == head_id else "worker",
+                    "head_addr": head_addr, "port": ray_port,
+                    # mgmt address, matching what vLLM expects for node affinity
+                    "node_ip": (self.config.effective(nid, node.detected).get("ray_node_ip")
+                                or (node.addresses or {}).get("mgmt", "")) if node else "",
+                    # this node's NCCL/fabric env, so Ray actors inherit it
+                    "env": scheduler._replica_env(eff_by.get(nid, {})) if node else {},
+                }), timeout=150)
+                results["ray:" + nid] = res
+                if not res.get("ok"):
+                    self._instances[instance_id]["state"] = "FAILED"
+                    return {"ok": False, "error": "ray bring-up failed on %s: %s"
+                                                  % (nid, res.get("error")),
+                            "results": results}
+            order = [head_id]                         # only the head execs vLLM
+        else:
+            order = [head_id]
+
         for nid in order:
             frame = protocol.make_frame(protocol.ENSURE_INSTANCE, bodies[nid])
             results[nid] = await self.send_command(nid, frame, timeout=kw.get("timeout", 300))
@@ -454,6 +483,27 @@ class ClusterHub:
             results[nid] = await self.send_command(nid, frame, timeout=60)
         meta["state"] = "STOPPED"
         return {"ok": True, "instance_id": instance_id, "results": results}
+
+    def instance_endpoint(self, instance_id: str) -> Optional[dict]:
+        """Where to reach a cluster instance's OpenAI API: {host, port, model}.
+
+        The head node serves the endpoint; workers are scheduled onto by Ray. Used by
+        /api/chat, which otherwise only knows the legacy single-node instances and
+        404s on anything the control plane launched.
+        """
+        meta = self._instances.get(instance_id)
+        if not meta:
+            return None
+        head_id = (meta.get("layout") or {}).get("head_id") or (meta.get("node_ids") or [None])[0]
+        node = self.registry.get(head_id) if head_id else None
+        if node is None:
+            return None
+        body = (meta.get("bodies") or {}).get(head_id, {})
+        host = self._fabric_ip(node) or (node.addresses or {}).get("mgmt", "")
+        return {"host": host,
+                "port": body.get("port") or meta.get("port"),
+                "model": body.get("served_model_name") or meta.get("model"),
+                "state": meta.get("state")}
 
     # -- logs -------------------------------------------------------------
     async def instance_logs(self, instance_id: str, tail: int = 200,
