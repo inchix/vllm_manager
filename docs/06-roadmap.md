@@ -12,16 +12,21 @@ dominate (see [03-storage-modelfsd](03-storage-modelfsd.md)). The transport stay
 (kernel-RDMA remains a fallback the control plane can drive), so if a *real* production
 bottleneck ever appears we revisit with actual numbers rather than a synthetic test.
 
-## Phase 1 — Control plane skeleton (agent + CCP + registry)
+## Phase 1 — Control plane skeleton (agent + CCP + registry) — ✅ IMPLEMENTED
 
-- Agent process (same image, `ROLES`/`CONTROL_PLANE` flags); dials admin WSS; `register` with
-  GPU/RDMA inventory; `heartbeat` + `telemetry`.
-- Admin: CCP hub endpoint (`/api/ccp`), node registry, `GET /api/cluster/nodes`, and a UI panel
-  showing **GPUs grouped by host, live** (the long-promised cross-node monitor).
-- No scheduling yet — observe only.
-- **Gate:** COVID (admin) + ebola (participant) both visible with correct live GPU telemetry;
-  kill ebola's agent / reboot ebola → admin marks it DOWN within `HEARTBEAT_MISS`, then READY
-  again automatically on reconnect. **No inference involved** — pure control-plane liveness.
+- ✅ Agent process (`admin/agent/agentd.py`, same image, `ROLES`/`CONTROL_PLANE` flags); dials
+  the admin over the CCP WebSocket; `register` with detected GPU/RDMA inventory; `heartbeat` +
+  live `telemetry`. Reconnects with jittered backoff and re-registers.
+- ✅ Admin: CCP hub (`admin/cluster/hub.py`, `/api/ccp`), node registry with lifecycle states,
+  `GET /api/cluster/nodes` / `/summary` / `/config`, mounted in `app.py` behind `CONTROL_PLANE`.
+- ✅ Layered config with per-node overrides (`admin/cluster/config.py`) and hardware detection
+  (`admin/cluster/detect.py`). UI panels (`admin/static/cluster.*`) render live GPUs-by-host and
+  the per-node config editor.
+- ✅ **Verified** by `admin/cluster/smoke_test.py`: a real agent registers against a real hub and
+  streams live per-GPU telemetry (util/mem/temp/power) — 7/7 checks pass on the COVID hardware.
+- **Remaining gate (needs both boxes):** COVID (admin) + ebola (participant) both visible with
+  live telemetry; reboot ebola → admin marks it DOWN within `HEARTBEAT_MISS`, then READY again
+  automatically on reconnect. (The transition logic exists; the two-box run is the field check.)
 
 ## Phase 2 — Scheduler + `ensure_replica` (single-node first)
 

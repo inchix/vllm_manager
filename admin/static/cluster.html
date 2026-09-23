@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vLLM Cluster</title>
+<link rel="stylesheet" href="cluster.css">
+</head>
+<body>
+<div class="page-header">
+  <h1>vLLM Multi-GPU &mdash; Cluster
+    <span class="badge role-badge" id="mock-badge" style="display:none;vertical-align:middle">mock data</span>
+  </h1>
+  <div class="header-actions">
+    <a class="theme-toggle" href="/" style="text-decoration:none">&larr; Admin</a>
+    <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()">Light Mode</button>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <!-- API key input (standalone review; sent as X-API-Key on every request) -->
+  <div class="keybar">
+    <label for="api-key-input">Admin API key</label>
+    <input id="api-key-input" type="password" autocomplete="current-password" placeholder="X-API-Key for /api/cluster/*">
+    <span class="key-status" id="key-status">no key</span>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="monitor">Live monitor</button>
+    <button class="tab-btn" data-tab="config">Configuration</button>
+  </div>
+
+  <!-- (A) Live cluster monitor -->
+  <section class="tab-panel active" id="panel-monitor">
+    <div class="card-head">
+      <h2 style="color:var(--text-subheading)">Nodes by host</h2>
+      <span class="muted">polling <code>GET /api/cluster/nodes</code> every 3s</span>
+    </div>
+    <div id="monitor-content">
+      <div class="banner banner-empty">Loading cluster telemetry&hellip;</div>
+    </div>
+  </section>
+
+  <!-- (B) Cluster configuration -->
+  <section class="tab-panel" id="panel-config">
+    <div id="config-content">
+      <div class="banner banner-empty">Loading cluster configuration&hellip;</div>
+    </div>
+  </section>
+
+</div>
+
+<div class="toast-container" id="toast-container"></div>
+
+<script src="cluster.js"></script>
+</body>
+</html>

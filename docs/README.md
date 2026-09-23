@@ -6,9 +6,14 @@ hardware (multi-node TP×PP over RoCE RDMA, shared models over NFS/RDMA). v0.4.0
 proven **data plane** and puts a real **control plane** on top of it, replacing ad-hoc
 SSH/manual orchestration with a small command-and-control protocol and composable node roles.
 
-> Status: **design / not yet implemented.** These documents are the spec we build against.
-> Nothing here changes the running v0.3.0 behaviour until the phases in
-> [06-roadmap](06-roadmap.md) land behind a feature flag.
+> Status: **Phase 1 implemented** (agent + CCP hub + registry + config + detection + UI +
+> `modelfsd`), verified end-to-end by `admin/cluster/smoke_test.py`. Everything is behind the
+> `CONTROL_PLANE` flag (default off), so the running v0.3.0 behaviour is unchanged. Phases 2–6
+> (scheduler wiring, storage coordination, multi-node auto-recovery) are in progress — see
+> [06-roadmap](06-roadmap.md).
+>
+> Code lives in `admin/cluster/` (control plane), `admin/agent/` (node agent), and
+> `storage/modelfsd/` (the Go read-only NFS daemon).
 
 ## Read in order
 

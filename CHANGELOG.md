@@ -4,9 +4,17 @@ All notable changes to vLLM Manager are documented here.
 
 ## v0.4.0 (unreleased) — control plane & composable roles
 
-**Design lift, documented in [`docs/`](docs/README.md); not yet implemented.** A re-architecture
-of how vLLM Manager spans machines. The proven v0.3.0 *data plane* (Ray + NCCL over RoCE, shared
-models over NFS) is kept; a real *control plane* goes on top.
+**Designed in [`docs/`](docs/README.md); Phase 1 implemented behind the `CONTROL_PLANE` flag
+(default off — v0.3.0 behaviour unchanged).** A re-architecture of how vLLM Manager spans
+machines. The proven v0.3.0 *data plane* (Ray + NCCL over RoCE, shared models over NFS) is kept;
+a real *control plane* goes on top.
+
+_Implemented so far (Phase 1, verified by `admin/cluster/smoke_test.py`):_ the node **agent**
+(`admin/agent/`), the **CCP hub** + node registry + REST (`admin/cluster/hub.py`), the layered
+**config** with per-node overrides (`admin/cluster/config.py`), hardware **detection**
+(`admin/cluster/detect.py`), the **UI** panels (`admin/static/cluster.*`), and **`modelfsd`**
+(`storage/modelfsd/`, Go, built into the image via a multi-stage stage). A real agent registers
+and streams live per-GPU telemetry to the admin end-to-end.
 
 - **Composable node roles** (`admin` / `participant` / `storage`) replace the single
   `ADMIN_ROLE`. One box can be all three; a cluster can split them freely.

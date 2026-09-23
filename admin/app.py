@@ -30,6 +30,11 @@ MODELS_DIR = Path(os.getenv("MODELS_DIR", "/models"))
 # boxes). entrypoint.sh has already started a Ray head on this container.
 CLUSTER_MODE = os.getenv("CLUSTER_MODE", "false").lower() == "true"
 
+# v0.4.0 control plane (agent/CCP + composable roles). Opt-in; default off keeps
+# the exact v0.3.0 behaviour. See docs/README.md.
+CONTROL_PLANE = os.getenv("CONTROL_PLANE", "false").lower() == "true"
+cluster_hub = None  # assigned below when CONTROL_PLANE is enabled
+
 VLLM_PORT_START = int(os.getenv("ADMIN_VLLM_PORT_START", os.getenv("VLLM_PORT_START", "8001")))
 VLLM_PORT_END = int(os.getenv("ADMIN_VLLM_PORT_END", os.getenv("VLLM_PORT_END", "8010")))
 MAX_INSTANCES = VLLM_PORT_END - VLLM_PORT_START + 1
@@ -129,9 +134,13 @@ def _on_instance_exit(instance_id: str, will_restart: bool) -> None:
 async def lifespan(_app: FastAPI):
     auth.log_startup_banner()
     await _restore_persisted()
+    if cluster_hub is not None:
+        cluster_hub.start()
     try:
         yield
     finally:
+        if cluster_hub is not None:
+            await cluster_hub.stop()
         # Best-effort graceful stop of everything on shutdown.
         await asyncio.gather(
             *(inst.stop() for inst in list(_instances.values())),
@@ -175,6 +184,39 @@ app = FastAPI(title="vLLM Admin", lifespan=lifespan)
 @app.middleware("http")
 async def _auth_mw(request: Request, call_next):
     return await auth.auth_middleware(request, call_next)
+
+
+# ---------------- v0.4.0 control plane (opt-in via CONTROL_PLANE) ----------------
+
+if CONTROL_PLANE:
+    try:
+        from admin.cluster.hub import ClusterHub, build_cluster_router
+
+        cluster_hub = ClusterHub(
+            config_path=str(MODELS_DIR / ".vllm-manager" / "cluster-config.json"),
+            api_key=auth.ADMIN_API_KEY,
+            auth_enabled=auth.AUTH_ENABLED,
+        )
+        app.include_router(build_cluster_router(cluster_hub))
+
+        _STATIC = Path(__file__).parent / "static"
+
+        @app.get("/cluster")
+        def _cluster_page():
+            return FileResponse(_STATIC / "cluster.html", headers={"Cache-Control": "no-cache"})
+
+        @app.get("/cluster.js")
+        def _cluster_js():
+            return FileResponse(_STATIC / "cluster.js", media_type="application/javascript")
+
+        @app.get("/cluster.css")
+        def _cluster_css():
+            return FileResponse(_STATIC / "cluster.css", media_type="text/css")
+
+        logger.info("Control plane ENABLED: CCP WebSocket /api/ccp, UI /cluster")
+    except Exception as _cp_err:  # noqa: BLE001
+        logger.error("Control plane failed to initialise (%s); continuing without it", _cp_err)
+        cluster_hub = None
 
 
 # ---------------- Auth routes ----------------
