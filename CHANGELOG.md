@@ -2,6 +2,32 @@
 
 All notable changes to vLLM Manager are documented here.
 
+## v0.4.0 (unreleased) — control plane & composable roles
+
+**Design lift, documented in [`docs/`](docs/README.md); not yet implemented.** A re-architecture
+of how vLLM Manager spans machines. The proven v0.3.0 *data plane* (Ray + NCCL over RoCE, shared
+models over NFS) is kept; a real *control plane* goes on top.
+
+- **Composable node roles** (`admin` / `participant` / `storage`) replace the single
+  `ADMIN_ROLE`. One box can be all three; a cluster can split them freely.
+  ([docs/01](docs/01-roles.md))
+- **Cluster Control Protocol (CCP)** — a JSON-over-WebSocket command-and-control protocol
+  between a per-node **agent** and the admin: registration, heartbeat + GPU telemetry, and typed
+  commands (`ensure_replica`, `mount_storage`, `serve_storage`, `sync_model`, `stop_replica`).
+  Outbound-only from workers (no inbound ports, no SSH). ([docs/02](docs/02-control-plane.md))
+- **Automatic liveness & recovery** — a node that hard-resets (see the ebola power saga) is
+  detected on heartbeat loss and **auto-rejoins on reconnect** via a declarative reconciliation
+  loop, instead of a manual `run.sh` + relaunch.
+- **`modelfsd`** — an embedded, userspace, **read-only NFSv3/TCP** daemon for model weights,
+  co-locatable on any node. Protocol core to be ported from the fuzz-tested `wgshare/internal/nfsd`;
+  solves both "can't run `nfsd` in a hardened container" and "kernel NFS client wedges in D-state
+  when the server vanishes." Transport (TCP vs kernel-RDMA) decided by a benchmark gate.
+  ([docs/03](docs/03-storage-modelfsd.md))
+- **Cross-node GPU monitoring** falls out of the telemetry stream (GPUs grouped by host, live).
+- **Opt-in and backward-compatible**: gated by `CONTROL_PLANE`; unset == exact v0.3.0 behaviour.
+  Relationship to community PR #1 (`cluster-two-host-ray`) and the cherry-pick plan are in
+  [docs/05](docs/05-migration.md); phased roadmap with hardware gates in [docs/06](docs/06-roadmap.md).
+
 ## v0.3.0
 
 ### Added — Multi-node / remote GPUs over RDMA
