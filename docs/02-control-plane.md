@@ -13,10 +13,10 @@ is the normative spec.
    share the single long-lived WebSocket. No second channel, no polling.
 4. **Liveness is intrinsic.** The same connection that carries commands is the heartbeat. If it
    drops, the node is presumed down — no separate health check to get out of sync.
-5. **Idempotent, declarative commands where possible.** `ensure_replica(spec)` rather than a
+5. **Idempotent, declarative commands where possible.** `ensure_instance(spec)` rather than a
    fragile start/opaque-pid/stop dance, so a reconnecting agent can be driven back to the
    desired state without special-casing crash recovery.
-6. **The agent owns the machine; the admin owns the intent.** The admin says *what* ("a replica
+6. **The agent owns the machine; the admin owns the intent.** The admin says *what* ("an instance
    with this layout"); the agent decides *how* locally (launch Ray worker, set env, exec vLLM)
    and reports back.
 
@@ -60,10 +60,10 @@ is the normative spec.
 |--------|------|---------------------|
 | `register` | First frame after connect | `node_id`, `hostname`, `roles[]`, `addresses{mgmt, fabric[]}`, `gpus[]` (index, model, mem_total, uuid), `rdma[]` (hca, ports, gid_index, netdev), `nccl_env{}` (the node's resolved NCCL/GID/HCA settings), `canonical_model_path`, `agent_version` |
 | `heartbeat` | Every `HEARTBEAT_SEC` (default 5s) | `seq`, `uptime`, `load` |
-| `telemetry` | Every `TELEMETRY_SEC` (default 5–10s) | `gpus[]` (index, util, mem_used, temp, power_draw, power_limit), `replicas[]` (id, state, port), `mounts[]` (path, source, ok) |
+| `telemetry` | Every `TELEMETRY_SEC` (default 5–10s) | `gpus[]` (index, util, mem_used, temp, power_draw, power_limit), `instances[]` (id, state, port), `mounts[]` (path, source, ok) |
 | `ack` | Immediately on receiving a command | `reply_to`, `accepted: bool`, `note?` |
 | `result` | When a command finishes | `reply_to`, `ok: bool`, `state`, `detail?`, `error?` |
-| `event` | Async local change (replica exited, mount dropped) | `kind`, `subject`, `detail` |
+| `event` | Async local change (instance exited, mount dropped) | `kind`, `subject`, `detail` |
 
 ### Admin → Agent
 
@@ -71,8 +71,8 @@ is the normative spec.
 |--------|---------|---------------------|
 | `hello` | Accept registration | `assigned{}`, `heartbeat_sec`, `telemetry_sec`, `effective_config{}` (this node's merged config — see [07-configuration](07-configuration.md)), `desired_state{}` (see reconciliation) |
 | `set_config` | Push updated effective config after a UI edit | `effective_config{}`, `apply` (`now` for live-safe settings like power cap, else `next_start`) |
-| `ensure_replica` | Declare the desired replica shape this node participates in | `replica_id`, `role_in_replica` (`head`/`worker`), `ray{head_addr, port}`, `model`, `layout{tp, pp, pp_layer_partition?}`, `vllm_args[]` (incl. `--enforce-eager`), `port`, `env{}` |
-| `stop_replica` | Tear down a replica on this node | `replica_id`, `ray: bool` (also stop the Ray runtime — see PG-leak note) |
+| `ensure_instance` | Declare the desired instance shape this node participates in | `instance_id`, `role_in_instance` (`head`/`worker`), `ray{head_addr, port}`, `model`, `layout{tp, pp, pp_layer_partition?}`, `vllm_args[]` (incl. `--enforce-eager`), `port`, `env{}` |
+| `stop_instance` | Tear down an instance on this node | `instance_id`, `ray: bool` (also stop the Ray runtime — see PG-leak note) |
 | `mount_storage` | Ensure the model repo is mounted | `source{host, export, transport}`, `canonical_path`, `opts[]` |
 | `unmount_storage` | Drop a mount | `canonical_path` |
 | `serve_storage` | (storage role) start/ensure `modelfsd` | `export_dir`, `allow[]` (client fabric IPs), `listen{fabric_ip, port}` |
@@ -82,16 +82,16 @@ is the normative spec.
 
 ## Reconciliation loop (why commands are declarative)
 
-The admin holds a **desired state** per node and per replica. On every (re)connect it sends the
+The admin holds a **desired state** per node and per instance. On every (re)connect it sends the
 node's `desired_state`, and the agent reconciles: start what should be running, stop what
 shouldn't. This is what makes recovery boring:
 
 ```
-ebola resets ──► WS drops ──► admin marks ebola DOWN, marks its replicas FAILED,
+ebola resets ──► WS drops ──► admin marks ebola DOWN, marks its instances FAILED,
                               (optionally reschedules onto remaining nodes)
 ebola reboots ─► agent reconnects, re-registers ──► admin resends desired_state
                               ──► agent re-mounts storage, rejoins Ray, restarts its
-                                  replica half ──► replica HEALTHY again, no human
+                                  instance half ──► instance HEALTHY again, no human
 ```
 
 Contrast v0.3.0, where this whole path was a person typing `bash run.sh` and re-launching the
@@ -101,27 +101,27 @@ model from the UI. **The reconciliation loop is the headline feature.**
 
 ```
                 register ok
-   (connect) ─────────────────► READY ──ensure_replica──► SERVING
+   (connect) ─────────────────► READY ──ensure_instance──► SERVING
       ▲                          │  ▲                        │
-      │                    miss  │  │ reconnect+reconcile    │ replica exits / heartbeat gap
+      │                    miss  │  │ reconnect+reconcile    │ instance exits / heartbeat gap
       │ reconnect          N HB  ▼  │                        ▼
    DISCONNECTED ◄──────────── DOWN ◄─────────────────────── DEGRADED
 ```
 
 - **READY** — registered, idle, inventory known.
-- **SERVING** — running its half of ≥1 replica.
-- **DEGRADED** — a replica on this node failed but the node is alive (e.g. vLLM crashed but the
+- **SERVING** — running its half of ≥1 instance.
+- **DEGRADED** — an instance on this node failed but the node is alive (e.g. vLLM crashed but the
   box is fine); admin retries per policy.
 - **DOWN** — `HEARTBEAT_MISS` intervals (default 3) with no heartbeat → presumed reset/dead;
-  replicas depending on it are marked FAILED.
+  instances depending on it are marked FAILED.
 - **DISCONNECTED → reconnect** re-enters the reconcile path.
 
 ## Telemetry = free cluster-wide monitoring
 
 The `telemetry` frame is exactly the per-node GPU stream we sketched earlier (util/mem/temp/
-power per GPU, plus replica and mount state). The admin aggregates it into:
+power per GPU, plus instance and mount state). The admin aggregates it into:
 
-- `GET /api/cluster/nodes` — every node, its roles, state, GPUs, replicas (JSON for the UI).
+- `GET /api/cluster/nodes` — every node, its roles, state, GPUs, instances (JSON for the UI).
 - A UI panel grouping GPUs **by host**, live, nothing hardcoded — the "monitor GPU usage across
   all nodes" ask, delivered as a side effect of the protocol rather than a bespoke feature.
 
@@ -137,8 +137,8 @@ power per GPU, plus replica and mount state). The admin aggregates it into:
 
 ## Open questions (resolve during Phase 1)
 
-- **Rescheduling policy** on node loss: auto-move a replica to survivors, or hold and alert?
+- **Rescheduling policy** on node loss: auto-move an instance to survivors, or hold and alert?
   Start with *hold + alert* (deterministic), add auto-reschedule later.
-- **Multiple replicas per node** (port allocation, GPU partitioning) — the frame set supports it;
+- **Multiple instances per node** (port allocation, GPU partitioning) — the frame set supports it;
   the scheduler's packing logic is a Phase 2 concern.
 - **mTLS vs bearer key** on the fabric — bearer key for v1, leave a hook for client certs.

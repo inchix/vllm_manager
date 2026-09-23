@@ -17,7 +17,7 @@ The three roles are orthogonal capabilities:
 | Role | Provides | Needs |
 |------|----------|-------|
 | **admin** | The control plane: FastAPI + UI, the CCP WebSocket hub, the scheduler, the node registry. Exactly **one** node per cluster is admin. | CPU + a reachable address on the management network. **No GPUs required.** |
-| **participant** | GPUs for inference. Runs the agent and, when scheduled, a Ray worker + the local half of a vLLM replica. **N** per cluster. | GPUs, RDMA NIC on the fabric, the model visible at the canonical path. |
+| **participant** | GPUs for inference. Runs the agent and, when scheduled, a Ray worker + the local half of a vLLM instance. **N** per cluster. | GPUs, RDMA NIC on the fabric, the model visible at the canonical path. |
 | **storage** | The model repo, exported read-only over the fabric via `modelfsd`. **≥1** per cluster (see failure coupling below). | Local disk holding the models, an RDMA NIC. |
 
 A node's roles are set in its `.env` (or by `setup.sh` detection) and reported to the admin at
@@ -82,24 +82,24 @@ before its PSU was fixed), the guidance is blunt:
 The control plane helps but cannot repeal physics:
 
 - The CCP heartbeat detects storage-node loss within one interval, so the admin can **refuse to
-  schedule replicas that depend on a down export** and surface the outage immediately.
+  schedule instances that depend on a down export** and surface the outage immediately.
 - Client mounts use `nofail` (already set in the v0.3.0 fstab guidance) so a peer never hangs
   at boot on a missing export.
 - `modelfsd`'s userspace design means a client read against a *gone* server returns a prompt
   error rather than a D-state hang (see [03-storage-modelfsd](03-storage-modelfsd.md)) — the
-  in-flight replica still fails, but the box stays healthy and recovers cleanly.
+  in-flight instance still fails, but the box stays healthy and recovers cleanly.
 
-Future option (not v1): **multiple storage nodes** with the same repo (replicated or
+Future option (not v1): **multiple storage nodes** with the same repo (instanceted or
 read-through), so the admin can fail mounts over. Designed for, not built yet.
 
 ## Constraints & invariants
 
 - **Exactly one `admin`** per cluster. Two admins is a split-brain; the CCP handshake rejects a
   second admin claiming the same cluster id.
-- **At least one `storage`** reachable, or no replica can load weights. A cluster with zero
+- **At least one `storage`** reachable, or no instance can load weights. A cluster with zero
   storage is legal only for nodes that already have models on local disk at the canonical path.
 - **The canonical model path is identical on every node** — enforced by the admin when it
-  issues `mount_storage`, and asserted before `start_replica`.
+  issues `mount_storage`, and asserted before `start_instance`.
 - A node with **no `participant` role contributes no GPUs**, even if it physically has them
   (lets you keep the admin box's GPUs free for other work — e.g. the Ollama coexistence we
   needed on COVID).

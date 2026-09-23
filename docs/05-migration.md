@@ -48,7 +48,7 @@ good, reusable pieces onto the v0.4.0 model:
   into the `sync_model` command.
 - ✅ **Preflight dependency check** (`deploy/check-deps.sh` / `/api/cluster/preflight`) → becomes
   an agent self-check reported at `register`.
-- ✅ **Replica recovery after admin restart** → subsumed by the reconciliation loop.
+- ✅ **Instance recovery after admin restart** → subsumed by the reconciliation loop.
 - ⛔ **SSH-into-Docker orchestration** → replaced by CCP.
 - ⛔ **`Containerfile.cluster` / `cluster/` Ray shell scripts** → replaced by the agent.
 
@@ -62,7 +62,7 @@ evolution of their idea. Do **not** attempt a straight merge onto v0.3.0.
 3. Bring COVID up (admin); ebola's agent dials in and registers.
 4. Model repo served by `modelfsd` on COVID (or kept on kernel-RDMA per the benchmark) and
    mounted on ebola by `mount_storage`.
-5. Launch a replica from the UI → scheduler fans out `ensure_replica` → same TP×PP×RoCE run as
+5. Launch an instance from the UI → scheduler fans out `ensure_instance` → same TP×PP×RoCE run as
    today, but now with auto-recovery if ebola blips.
 
 Rollback is trivial: unset `CONTROL_PLANE` and you're back on the v0.3.0 path.

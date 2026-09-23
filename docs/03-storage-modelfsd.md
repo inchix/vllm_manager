@@ -33,7 +33,7 @@ dependency. Its properties map onto our problem almost exactly:
 - **Prompt failure instead of D-state hang.** `wgshare/internal/lanserve` bounds each fetch with
   a `ReadTimeout` — a stalled source yields `NFS3ERR_IO` "rather than a client stuck in
   uninterruptible sleep." That is the ebola problem solved at the storage layer: a vanished
-  storage node fails the in-flight replica but leaves the client box healthy and recoverable.
+  storage node fails the in-flight instance but leaves the client box healthy and recoverable.
 - **Path containment** (`wgshare/internal/safepath`) — the export root can't be escaped.
 
 ## What we take, and what we deliberately leave
@@ -95,7 +95,7 @@ dead server returns errors rather than hanging the client (belt-and-braces with 
 `ReadTimeout`).
 
 The control plane owns this: `mount_storage` issues the mount, asserts the canonical path
-matches, and gates `start_replica` on the mount being present.
+matches, and gates `start_instance` on the mount being present.
 
 ## The transport trade-off (decided: TCP)
 
@@ -109,21 +109,21 @@ matches, and gates `start_replica` on the mount being present.
 Giving up RDMA transport costs CPU and zero-copy. **Whether that matters depends entirely on our
 access pattern**, which is favorable:
 
-- Model load is a **one-time bulk sequential read** at replica start (Devstral-24B ≈ 47 GB,
+- Model load is a **one-time bulk sequential read** at instance start (Devstral-24B ≈ 47 GB,
   streamed once), not the seek-heavy random IO where RDMA's latency win dominates.
 - Even plain TCP over a 40–56 GbE-class RoCE NIC sustains multiple GB/s; readahead helps
-  further. A ~47 GB load at, say, 2–3 GB/s is ~16–24 s, paid once per replica start.
+  further. A ~47 GB load at, say, 2–3 GB/s is ~16–24 s, paid once per instance start.
 
 **Adding a real RDMA transport to a userspace NFS server is exotic and a large lift — explicitly
 out of scope for v1.** Giving up RDMA transport costs CPU and zero-copy, but for a one-time bulk
 sequential load over a 40–56 GbE-class RoCE NIC (multiple GB/s, with readahead), TCP is
-comfortably fast enough — a ~47 GB load is tens of seconds, paid once per replica start.
+comfortably fast enough — a ~47 GB load is tens of seconds, paid once per instance start.
 
 **Decision: go with `modelfsd` over RoCE-TCP for the `storage` role. No load-test gate.** The
 operational wins (containerable, non-root, no-hang, C2-driven, already fuzz-tested) clearly
 dominate a one-time load cost, and the access pattern is exactly the case where TCP is fine.
 We don't need to measure the obvious. If a *real-world* bottleneck ever shows up (e.g. very
-frequent cold starts, or many replicas loading at once), the transport is pluggable — see the
+frequent cold starts, or many instances loading at once), the transport is pluggable — see the
 escape hatch below — and we can revisit with actual production numbers rather than a synthetic
 benchmark.
 

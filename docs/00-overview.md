@@ -14,7 +14,7 @@ the same seams:
 1. **v0.3.0 (`CLUSTER_MODE` / `ADMIN_ROLE=manager|worker`)** runs Ray inside the admin image on
    every box and starts each box by hand (`bash run.sh` here, `bash run.sh` there). There is no
    central view of the cluster, no liveness, and no recovery: when a worker box reboots, the
-   whole replica dies and a human must restart the worker and relaunch the model. We lived this
+   whole instance dies and a human must restart the worker and relaunch the model. We lived this
    repeatedly during the ebola power-fault debugging — every reset was a manual recovery.
 
 2. **Community PR #1 (`cluster-two-host-ray`)** reaches for a cleaner split — a CPU-only admin
@@ -36,7 +36,7 @@ Both are circling the same missing piece: **a control plane.** v0.4.0 builds it.
   speaks the **Cluster Control Protocol (CCP)** — register, heartbeat + telemetry, commands.
   See [02-control-plane](02-control-plane.md).
 - The admin becomes a **scheduler + registry + monitor**: it knows every node's GPU/RDMA
-  inventory live, schedules replicas, coordinates mounts, and **detects and recovers dead
+  inventory live, schedules instances, coordinates mounts, and **detects and recovers dead
   nodes automatically**.
 - Model storage becomes a **first-class role** served by **`modelfsd`**, a small userspace
   read-only NFS daemon, co-locatable on any node. See [03-storage-modelfsd](03-storage-modelfsd.md).
@@ -96,7 +96,7 @@ kilobytes of JSON (who's alive, start this, mount that). The RoCE fabric carries
 - **CCP** — *Cluster Control Protocol*, the JSON-over-WebSocket protocol between agent and admin.
 - **agent** — the per-node daemon that speaks CCP and executes commands locally.
 - **role** — a capability a node offers: `admin`, `participant`, or `storage`. Composable.
-- **replica** — one distributed vLLM instance (an OpenAI-compatible endpoint) spanning one or
+- **instance** — one distributed vLLM instance (an OpenAI-compatible endpoint) spanning one or
   more participants with a given TP×PP layout.
 - **`modelfsd`** — the read-only userspace NFSv3/TCP daemon serving model weights.
 - **canonical model path** — the single filesystem path (e.g. `/export/llm_models`) at which

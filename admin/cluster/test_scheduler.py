@@ -78,7 +78,7 @@ def test_layout_driver_first_ordering():
     assert lay2["ordered_ids"] == ["b", "a"]     # 10.0.0.2 before 10.0.0.9
 
 
-# -- build_replica_plan: executor + enforce-eager gating ----------------------
+# -- build_instance_plan: executor + enforce-eager gating ----------------------
 
 def _eff(**over):
     base = {"enforce_eager": True, "disable_custom_all_reduce": True,
@@ -89,7 +89,7 @@ def _eff(**over):
 
 def test_single_node_uses_mp_and_no_enforce_eager():
     nodes = [_node("a", 2, 32768, "10.0.0.2")]
-    plan = scheduler.build_replica_plan("r1", nodes, "m", {"a": _eff()}, port=8001)
+    plan = scheduler.build_instance_plan("r1", nodes, "m", {"a": _eff()}, port=8001)
     assert plan["layout"]["pp"] == 1
     head_body = plan["commands"][0][1]
     assert head_body["layout"]["executor"] == "mp"
@@ -100,10 +100,10 @@ def test_single_node_uses_mp_and_no_enforce_eager():
 def test_multi_node_uses_ray_and_enforce_eager():
     nodes = [_node("a", 2, 32768, "10.0.0.2"), _node("b", 2, 16384, "10.0.0.3")]
     eff = {"a": _eff(), "b": _eff()}
-    plan = scheduler.build_replica_plan("r2", nodes, "m", eff, port=8001, num_layers=40)
+    plan = scheduler.build_instance_plan("r2", nodes, "m", eff, port=8001, num_layers=40)
     assert plan["layout"]["pp"] == 2
     assert plan["pp_layer_partition"] == "27,13"
-    head_body = next(b for nid, b in plan["commands"] if b["role_in_replica"] == "head")
+    head_body = next(b for nid, b in plan["commands"] if b["role_in_instance"] == "head")
     assert head_body["layout"]["executor"] == "ray"
     assert "--enforce-eager" in head_body["vllm_args"]          # cluster PP: required
 
@@ -114,7 +114,7 @@ def test_per_node_env_carries_fabric_settings():
         "a": _eff(nccl_socket_ifname="enp196s0,ens2", nccl_ib_hca="mlx4_0:1", nccl_p2p_disable=True),
         "b": _eff(nccl_socket_ifname="ens2,enp196s0", nccl_ib_hca="mlx4_0:1", nccl_p2p_disable=True),
     }
-    plan = scheduler.build_replica_plan("r3", nodes, "m", eff, port=8001, num_layers=40)
+    plan = scheduler.build_instance_plan("r3", nodes, "m", eff, port=8001, num_layers=40)
     envs = {nid: b["env"] for nid, b in plan["commands"]}
     assert envs["a"]["NCCL_SOCKET_IFNAME"] == "enp196s0,ens2"   # local-first per node
     assert envs["b"]["NCCL_SOCKET_IFNAME"] == "ens2,enp196s0"

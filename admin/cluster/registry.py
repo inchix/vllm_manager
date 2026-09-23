@@ -33,7 +33,7 @@ class Node:
         self.last_seq = -1
         self.disconnected_at: Optional[float] = None
         self.telemetry_gpus: list = []  # live per-gpu stats (from telemetry)
-        self.replicas: list = []
+        self.instances: list = []
         self.mounts: list = []
         self.volumes: list = []         # share candidates on this node
         self.shares: list = []          # currently exported: {path, endpoint, ok}
@@ -69,7 +69,7 @@ class Node:
             "interfaces": (self.detected or {}).get("interfaces", []),
             "rdma": self.rdma,
             "gpus": self.merged_gpus(),
-            "replicas": self.replicas,
+            "instances": self.instances,
             "mounts": self.mounts,
             "volumes": self.volumes,
             "shares": self.shares,
@@ -101,7 +101,7 @@ class Registry:
         node.disconnected_at = None
         node.last_seen = time.time()
         node.last_heartbeat = node.last_seen
-        node.state = protocol.STATE_SERVING if node.replicas else protocol.STATE_READY
+        node.state = protocol.STATE_SERVING if node.instances else protocol.STATE_READY
         self._nodes[node_id] = node
         return node
 
@@ -114,26 +114,26 @@ class Registry:
         node.last_seq = seq
         node.connected = True
         if node.state in (protocol.STATE_DISCONNECTED, protocol.STATE_DOWN):
-            node.state = protocol.STATE_SERVING if node.replicas else protocol.STATE_READY
+            node.state = protocol.STATE_SERVING if node.instances else protocol.STATE_READY
 
-    def on_telemetry(self, node_id: str, gpus: list, replicas: list, mounts: list,
+    def on_telemetry(self, node_id: str, gpus: list, instances: list, mounts: list,
                      volumes: Optional[list] = None, shares: Optional[list] = None) -> None:
         node = self._nodes.get(node_id)
         if not node:
             return
         node.telemetry_gpus = gpus or []
-        node.replicas = replicas or []
+        node.instances = instances or []
         node.mounts = mounts or []
         if volumes is not None:
             node.volumes = volumes
         if shares is not None:
             node.shares = shares
         node.last_seen = time.time()
-        failed = any(r.get("state") in ("FAILED", "ERROR") for r in node.replicas)
+        failed = any(r.get("state") in ("FAILED", "ERROR") for r in node.instances)
         if node.connected:
             if failed:
                 node.state = protocol.STATE_DEGRADED
-            elif node.replicas:
+            elif node.instances:
                 node.state = protocol.STATE_SERVING
             else:
                 node.state = protocol.STATE_READY

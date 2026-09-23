@@ -12,16 +12,16 @@
  *       (POST /api/models/delete), plus a Hugging Face download form
  *       (POST /api/download, progress from GET /api/download/status). Carried
  *       over from index.html, same endpoints and field names.
- *   (C) LAUNCH A REPLICA — pick a model, then tick GPUs ANYWHERE in the
+ *   (C) LAUNCH A INSTANCE — pick a model, then tick GPUs ANYWHERE in the
  *       cluster. The layout is derived live from the ticks:
  *           TP = GPUs selected per node,  PP = number of distinct nodes
  *       (docs/04 — TP within a node, PP across nodes). An uneven selection is
  *       refused with an inline warning. Preview -> POST /api/cluster/plan
  *       renders the real layout / pp_layer_partition / per-node vllm_args
  *       before anything is committed; Launch -> POST /api/cluster/launch.
- *   (D) RUNNING REPLICAS — from GET /api/cluster/summary (`replicas`) merged
- *       with each node's `replicas[]` in GET /api/cluster/nodes. Stop ->
- *       POST /api/cluster/stop { replica_id, ray: true } (docs/04: ray:true is
+ *   (D) RUNNING INSTANCES — from GET /api/cluster/summary (`instances`) merged
+ *       with each node's `instances[]` in GET /api/cluster/nodes. Stop ->
+ *       POST /api/cluster/stop { instance_id, ray: true } (docs/04: ray:true is
  *       the default teardown — it bounces the Ray runtime and avoids the
  *       placement-group leak).
  *
@@ -65,7 +65,7 @@
  *   and how TP/PP are derived, and gpu_memory_utilization comes from each
  *   node's effective config — the form says so inline.
  *
- *   POST /api/cluster/stop     { replica_id: "replica-1", ray: true }
+ *   POST /api/cluster/stop     { instance_id: "instance-1", ray: true }
  *   POST /api/download         { repo_id: "org/model" }  (+ revision when typed)
  *   POST /api/models/delete    { model: "<model name>" }
  *
@@ -80,7 +80,7 @@
  *
  * ?mock=1 (or window.SERVING_MOCK = true, which serving-preview.html sets)
  * renders a built-in sample cluster — covid 2×V100-32GB + ebola 2×V100-16GB,
- * two models, one running replica — with clickable preview/launch/stop, so the
+ * two models, one running instance — with clickable preview/launch/stop, so the
  * panel can be reviewed with no backend running.
  * ==========================================================================*/
 (function () {
@@ -286,10 +286,10 @@
         '<div id="sv-models"><div class="banner banner-empty">Loading models&hellip;</div></div>' +
       '</section>' +
 
-      // ---- (C) launch a replica ---------------------------------------
+      // ---- (C) launch an instance ---------------------------------------
       '<section class="sv-block">' +
         '<div class="card-head">' +
-          '<h2 class="sv-h2">Launch a replica</h2>' +
+          '<h2 class="sv-h2">Launch an instance</h2>' +
           '<span class="muted">TP within a node &middot; PP across nodes (docs/04)</span>' +
         '</div>' +
         '<div class="sv-card">' +
@@ -320,7 +320,7 @@
             '</div>' +
           '</div>' +
 
-          '<div class="sv-sub-title">GPUs — tick the ones this replica should use</div>' +
+          '<div class="sv-sub-title">GPUs — tick the ones this instance should use</div>' +
           '<div id="sv-picker"><div class="muted">Loading cluster GPUs&hellip;</div></div>' +
 
           '<div id="sv-layout"></div>' +
@@ -335,13 +335,13 @@
         '</div>' +
       '</section>' +
 
-      // ---- (D) running replicas ---------------------------------------
+      // ---- (D) running instances ---------------------------------------
       '<section class="sv-block">' +
         '<div class="card-head">' +
-          '<h2 class="sv-h2">Running replicas</h2>' +
-          '<span class="muted"><code>GET /api/cluster/summary</code> + per-node <code>replicas[]</code></span>' +
+          '<h2 class="sv-h2">Running instances</h2>' +
+          '<span class="muted"><code>GET /api/cluster/summary</code> + per-node <code>instances[]</code></span>' +
         '</div>' +
-        '<div id="sv-replicas"><div class="banner banner-empty">Loading replicas&hellip;</div></div>' +
+        '<div id="sv-instances"><div class="banner banner-empty">Loading instances&hellip;</div></div>' +
       '</section>';
   }
 
@@ -440,7 +440,7 @@
     renderModelSelect();
     renderPicker();
     renderLayout();
-    renderReplicas();
+    renderInstances();
   }
 
   /* =======================================================================
@@ -683,7 +683,7 @@
     }).join('');
   }
 
-  // Nodes that can actually run a replica, in a stable order.
+  // Nodes that can actually run an instance, in a stable order.
   function participantNodes() {
     return state.nodes.filter(function (n) {
       return (n.gpus || []).length && (!(n.roles || []).length || hasRole(n, 'participant'));
@@ -940,7 +940,7 @@
     if (!r.ok) {
       showToast('Launch failed: ' + (r.error || 'unknown error'), 'error');
     } else {
-      var rid = (r.data && r.data.replica_id) || 'replica';
+      var rid = (r.data && r.data.instance_id) || 'instance';
       showToast('Launched ' + rid + ' — ' + body.model + ' on ' + body.node_ids.join(', '), 'success');
       if (MOCK) { mockTick(); renderAll(); } else { poll(); }
     }
@@ -983,7 +983,7 @@
           var args = Array.isArray(b.vllm_args) ? b.vllm_args : [];
           var envKeys = Object.keys(b.env || {});
           var lines = [
-            'role            ' + (b.role_in_replica || '?'),
+            'role            ' + (b.role_in_instance || '?'),
             'model           ' + (b.model || ''),
             'port            ' + (b.port == null ? '(worker — no API port)' : b.port),
             'tp / pp         ' + l.tp + ' / ' + l.pp + '   executor=' + (l.executor || '?'),
@@ -996,7 +996,7 @@
           ].join('\n');
           return '<div class="sv-plan-node">' +
             '<div class="sv-plan-node-head"><span class="sv-node-name">' + esc(c.node_id) + '</span>' +
-              '<span class="badge role-badge">' + esc(b.role_in_replica || 'node') + '</span></div>' +
+              '<span class="badge role-badge">' + esc(b.role_in_instance || 'node') + '</span></div>' +
             '<pre class="sv-pre">' + esc(lines) + '</pre>' +
           '</div>';
         }).join('')
@@ -1010,30 +1010,30 @@
   }
 
   /* =======================================================================
-   * (D) RUNNING REPLICAS
+   * (D) RUNNING INSTANCES
    * ===================================================================== */
 
   /* Merge two views of the same thing:
-   *   - GET /api/cluster/summary -> replicas: { "<replica_id>": "SERVING" }
+   *   - GET /api/cluster/summary -> instances: { "<instance_id>": "SERVING" }
    *     (older/derived summaries may instead count by state — those values are
-   *     numbers and carry no replica id, so they are ignored here)
-   *   - GET /api/cluster/nodes -> each node's replicas[]: { id, state, port, role }
+   *     numbers and carry no instance id, so they are ignored here)
+   *   - GET /api/cluster/nodes -> each node's instances[]: { id, state, port, role }
    */
-  function collectReplicas() {
+  function collectInstances() {
     var byId = {};
-    var sum = (state.summary && state.summary.replicas) || {};
+    var sum = (state.summary && state.summary.instances) || {};
     Object.keys(sum).forEach(function (rid) {
       var v = sum[rid];
       if (typeof v !== 'string') return;             // a state->count map, not ids
       byId[rid] = { id: rid, state: v, nodes: [], port: null, roles: {} };
     });
     state.nodes.forEach(function (n) {
-      (n.replicas || []).forEach(function (r) {
+      (n.instances || []).forEach(function (r) {
         if (!r || !r.id) return;
         var e = byId[r.id] || (byId[r.id] = { id: r.id, state: r.state || 'UNKNOWN', nodes: [], port: null, roles: {} });
         e.nodes.push(nodeName(n));
         if (r.port) e.port = r.port;
-        if (r.role || r.role_in_replica) e.roles[nodeName(n)] = r.role || r.role_in_replica;
+        if (r.role || r.role_in_instance) e.roles[nodeName(n)] = r.role || r.role_in_instance;
         // A per-node FAILED beats an optimistic cluster-level state.
         if (String(r.state || '').toUpperCase() === 'FAILED') e.state = 'FAILED';
         else if (!e.state) e.state = r.state;
@@ -1042,15 +1042,15 @@
     return Object.keys(byId).map(function (k) { return byId[k]; });
   }
 
-  function renderReplicas() {
-    var host = el('sv-replicas');
+  function renderInstances() {
+    var host = el('sv-instances');
     if (!host) return;
-    var un = clusterUnavailableHtml('Replica list');
+    var un = clusterUnavailableHtml('Instance list');
     if (un) { host.innerHTML = un; return; }
 
-    var reps = collectReplicas();
+    var reps = collectInstances();
     if (!reps.length) {
-      host.innerHTML = '<div class="banner banner-empty">No replicas running. Launch one above.</div>';
+      host.innerHTML = '<div class="banner banner-empty">No instances running. Launch one above.</div>';
       return;
     }
     var rows = reps.map(function (r) {
@@ -1063,20 +1063,20 @@
         : '<span class="muted">—</span>';
       return '<tr>' +
         '<td class="mono">' + esc(r.id) + '</td>' +
-        '<td><span class="badge state-badge ' + replicaStateClass(st) + '"><span class="state-dot"></span>' + esc(st) + '</span></td>' +
+        '<td><span class="badge state-badge ' + instanceStateClass(st) + '"><span class="state-dot"></span>' + esc(st) + '</span></td>' +
         '<td><div class="chip-row">' + nodes + '</div></td>' +
         '<td class="mono">' + (r.port ? ':' + esc(r.port) : '—') + '</td>' +
-        '<td class="num"><button class="btn btn-danger" data-act="stop-replica" data-replica="' + esc(r.id) + '">Stop</button></td>' +
+        '<td class="num"><button class="btn btn-danger" data-act="stop-instance" data-instance="' + esc(r.id) + '">Stop</button></td>' +
       '</tr>';
     }).join('');
 
     host.innerHTML = '<div class="table-wrap"><table class="summary-table">' +
-      '<thead><tr><th>Replica</th><th>State</th><th>Nodes</th><th>Port</th><th class="num">Actions</th></tr></thead>' +
+      '<thead><tr><th>Instance</th><th>State</th><th>Nodes</th><th>Port</th><th class="num">Actions</th></tr></thead>' +
       '<tbody>' + rows + '</tbody></table></div>' +
-      '<div class="muted sv-legend">Stop sends <code>{ replica_id, ray: true }</code> — bouncing the Ray runtime with the replica is the default teardown (docs/04: it avoids the placement-group leak).</div>';
+      '<div class="muted sv-legend">Stop sends <code>{ instance_id, ray: true }</code> — bouncing the Ray runtime with the instance is the default teardown (docs/04: it avoids the placement-group leak).</div>';
   }
 
-  function replicaStateClass(st) {
+  function instanceStateClass(st) {
     var s = String(st).toLowerCase();
     if (s === 'serving' || s === 'healthy' || s === 'running') return 'state-serving';
     if (s === 'starting' || s === 'pending') return 'state-ready';
@@ -1085,12 +1085,12 @@
     return 'state-unknown';
   }
 
-  async function onStopReplica(rid) {
+  async function onStopInstance(rid) {
     if (!rid) return;
-    if (!MOCK && !window.confirm('Stop replica "' + rid + '"? Ray will be bounced on its nodes.')) return;
-    if (MOCK) { mockStopReplica(rid); renderAll(); showToast('Mock mode: stopped ' + rid, 'success'); return; }
-    // POST /api/cluster/stop { replica_id, ray: true }
-    var r = await post('/api/cluster/stop', { replica_id: rid, ray: true }, true);
+    if (!MOCK && !window.confirm('Stop instance "' + rid + '"? Ray will be bounced on its nodes.')) return;
+    if (MOCK) { mockStopInstance(rid); renderAll(); showToast('Mock mode: stopped ' + rid, 'success'); return; }
+    // POST /api/cluster/stop { instance_id, ray: true }
+    var r = await post('/api/cluster/stop', { instance_id: rid, ray: true }, true);
     if (!r.ok) { showToast('Stop failed: ' + r.error, 'error'); return; }
     showToast('Stopped ' + rid, 'success');
     poll();
@@ -1130,7 +1130,7 @@
     else if (act === 'delete-model') { ev.preventDefault(); onDeleteModel(t.dataset.model); }
     else if (act === 'preview') { ev.preventDefault(); onPreview(); }
     else if (act === 'launch') { ev.preventDefault(); onLaunch(); }
-    else if (act === 'stop-replica') { ev.preventDefault(); onStopReplica(t.dataset.replica); }
+    else if (act === 'stop-instance') { ev.preventDefault(); onStopInstance(t.dataset.instance); }
     else if (act === 'clear-sel') {
       ev.preventDefault();
       state.selected.clear();
@@ -1184,7 +1184,7 @@
 
   /* =======================================================================
    * MOCK DATA (?mock=1 / window.SERVING_MOCK) — covid 2×V100-32GB +
-   * ebola 2×V100-16GB, two models, one replica already serving.
+   * ebola 2×V100-16GB, two models, one instance already serving.
    * ===================================================================== */
 
   var MOCK_NODES = [
@@ -1196,7 +1196,7 @@
         { index: 0, model: 'Tesla V100-SXM2-32GB', util: 94, mem_used: 30210, mem_total: 32768, temp: 71, power_draw: 288, power_limit: 300 },
         { index: 1, model: 'Tesla V100-SXM2-32GB', util: 91, mem_used: 29880, mem_total: 32768, temp: 68, power_draw: 271, power_limit: 300 },
       ],
-      replicas: [{ id: 'devstral-r0', state: 'SERVING', port: 8001, role: 'head' }],
+      instances: [{ id: 'devstral-r0', state: 'SERVING', port: 8001, role: 'head' }],
     },
     {
       node_id: 'ebola-c3d4', hostname: 'ebola',
@@ -1206,7 +1206,7 @@
         { index: 0, model: 'Tesla V100-PCIE-16GB', util: 88, mem_used: 15100, mem_total: 16384, temp: 79, power_draw: 148, power_limit: 150 },
         { index: 1, model: 'Tesla V100-PCIE-16GB', util: 2, mem_used: 312, mem_total: 16384, temp: 44, power_draw: 33, power_limit: 150 },
       ],
-      replicas: [{ id: 'devstral-r0', state: 'SERVING', port: 8001, role: 'worker' }],
+      instances: [{ id: 'devstral-r0', state: 'SERVING', port: 8001, role: 'worker' }],
     },
   ];
 
@@ -1219,9 +1219,9 @@
     mockData = {
       nodes: JSON.parse(JSON.stringify(MOCK_NODES)),
       models: MOCK_MODELS.slice(),
-      replicaStates: { 'devstral-r0': 'SERVING' },
+      instanceStates: { 'devstral-r0': 'SERVING' },
       download: { status: 'idle', repo_id: null, downloaded_bytes: 0, total_bytes: 0, error: null },
-      nextReplica: 1,
+      nextInstance: 1,
     };
     return mockData;
   }
@@ -1261,7 +1261,7 @@
       roles: { admin: 1, participant: 2, storage: 1 },
       // The control plane publishes display names for the role wire ids.
       role_labels: { admin: 'Admin', participant: 'GPU Worker', storage: 'Storage' },
-      replicas: Object.assign({}, d.replicaStates),
+      instances: Object.assign({}, d.instanceStates),
     };
     pruneSelection();
   }
@@ -1315,8 +1315,8 @@
       return {
         node_id: n.node_id,
         body: {
-          replica_id: 'plan-preview',
-          role_in_replica: i === 0 ? 'head' : 'worker',
+          instance_id: 'plan-preview',
+          role_in_instance: i === 0 ? 'head' : 'worker',
           ray: { head_addr: (ordered[0].addresses.fabric || [])[0], port: 6379 },
           model: body.model,
           layout: { tp: tp, pp: pp, pp_layer_partition: partition, executor: pp > 1 ? 'ray' : 'mp' },
@@ -1358,22 +1358,22 @@
     var d = mockInit();
     var p = mockPlan(body);
     if (!p.ok) return p;
-    var rid = 'replica-' + (++d.nextReplica);
-    d.replicaStates[rid] = 'SERVING';
+    var rid = 'instance-' + (++d.nextInstance);
+    d.instanceStates[rid] = 'SERVING';
     p.data.layout.ordered_ids.forEach(function (nid, i) {
       var n = d.nodes.find(function (x) { return x.node_id === nid; });
       if (!n) return;
-      n.replicas = n.replicas || [];
-      n.replicas.push({ id: rid, state: 'SERVING', port: i === 0 ? body.port : null, role: i === 0 ? 'head' : 'worker' });
+      n.instances = n.instances || [];
+      n.instances.push({ id: rid, state: 'SERVING', port: i === 0 ? body.port : null, role: i === 0 ? 'head' : 'worker' });
     });
-    return { ok: true, data: { ok: true, replica_id: rid, layout: p.data.layout } };
+    return { ok: true, data: { ok: true, instance_id: rid, layout: p.data.layout } };
   }
 
-  function mockStopReplica(rid) {
+  function mockStopInstance(rid) {
     var d = mockInit();
-    delete d.replicaStates[rid];
+    delete d.instanceStates[rid];
     d.nodes.forEach(function (n) {
-      n.replicas = (n.replicas || []).filter(function (r) { return r.id !== rid; });
+      n.instances = (n.instances || []).filter(function (r) { return r.id !== rid; });
     });
     mockTick();
   }

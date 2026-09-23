@@ -72,13 +72,13 @@ def test_disconnect_then_sweep_to_down():
     assert r.get("n1").state == protocol.STATE_DOWN
 
 
-def test_telemetry_failed_replica_degrades():
+def test_telemetry_failed_instance_degrades():
     r = Registry()
     r.register(_body("n1"))
-    r.on_telemetry("n1", gpus=[], replicas=[{"id": "r1", "state": "FAILED"}], mounts=[])
+    r.on_telemetry("n1", gpus=[], instances=[{"id": "r1", "state": "FAILED"}], mounts=[])
     assert r.get("n1").state == protocol.STATE_DEGRADED
-    # a healthy serving replica -> SERVING
-    r.on_telemetry("n1", gpus=[], replicas=[{"id": "r1", "state": "SERVING"}], mounts=[])
+    # a healthy serving instance -> SERVING
+    r.on_telemetry("n1", gpus=[], instances=[{"id": "r1", "state": "SERVING"}], mounts=[])
     assert r.get("n1").state == protocol.STATE_SERVING
 
 
@@ -99,7 +99,7 @@ def test_public_merges_live_telemetry():
     r = Registry()
     r.register(_body("n1"))
     r.on_telemetry("n1", gpus=[{"index": 0, "util": 55.0, "mem_used": 14903, "temp": 48.0}],
-                   replicas=[], mounts=[])
+                   instances=[], mounts=[])
     pub = r.public()[0]
     g0 = next(g for g in pub["gpus"] if g["index"] == 0)
     assert g0["model"] == "V100"          # base inventory

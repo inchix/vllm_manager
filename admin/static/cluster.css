@@ -136,7 +136,7 @@ a:hover { text-decoration: underline; }
 .temp-warm { color: var(--warning-border); }
 .temp-hot { color: #f44336; font-weight: 600; }
 
-/* Replicas & mounts */
+/* Instances & mounts */
 .sub-section { margin-top: 12px; }
 .sub-title { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-muted); margin-bottom: 6px; }
 .chip-row { display: flex; flex-wrap: wrap; gap: 6px; }

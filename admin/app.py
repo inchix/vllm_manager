@@ -988,6 +988,25 @@ def healthz():
 
 @app.get("/")
 def root():
+    """The landing page.
+
+    With the control plane on, "/" IS the tabbed cluster UI (Summary | Serving |
+    Workers | Storage | Configuration) — the old single-node page is redundant
+    because Serving absorbed its model library, downloads and launch, and does
+    so cluster-wide. With CONTROL_PLANE off, "/" is the unchanged v0.3.0 page.
+    The old page stays reachable at /legacy either way (it still has the chat
+    tester, which the tabs do not cover yet).
+    """
+    page = "cluster.html" if (CONTROL_PLANE and cluster_hub is not None) else "index.html"
+    return FileResponse(
+        Path(__file__).parent / "static" / page,
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/legacy")
+def legacy_ui():
+    """The v0.3.0 single-node UI, always available (retains the chat tester)."""
     return FileResponse(
         Path(__file__).parent / "static" / "index.html",
         headers={"Cache-Control": "no-cache"},

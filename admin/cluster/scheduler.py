@@ -2,7 +2,7 @@
 
 Given a set of live participant nodes and the effective config, compute the TP×PP layout
 (TP within a node, PP across nodes), the memory-weighted pipeline layer partition, pick the head
-node, allocate a port, and emit one `ensure_replica` body per node. The layout rules mirror the
+node, allocate a port, and emit one `ensure_instance` body per node. The layout rules mirror the
 v0.3.0 cluster launch path (docs/04): homogeneous TP per node, PP = node count, driver-first
 ordering to match vLLM's `sort_by_driver_then_worker_ip`.
 """
@@ -102,8 +102,8 @@ def compute_layout(nodes: list, head_id: Optional[str] = None) -> dict:
     }
 
 
-def build_replica_plan(
-    replica_id: str,
+def build_instance_plan(
+    instance_id: str,
     nodes: list,
     model: str,
     effective_by_node: dict,
@@ -115,7 +115,7 @@ def build_replica_plan(
     max_model_len: Optional[int] = None,
     extra_args: Optional[list] = None,
 ) -> dict:
-    """Produce {replica_id, layout, head_id, commands:[(node_id, ensure_replica_body)]}."""
+    """Produce {instance_id, layout, head_id, commands:[(node_id, ensure_instance_body)]}."""
     layout = compute_layout(nodes, head_id)
     ordered = layout["ordered_nodes"]
     head = ordered[0]
@@ -148,8 +148,8 @@ def build_replica_plan(
     commands = []
     for i, node in enumerate(ordered):
         body = {
-            "replica_id": replica_id,
-            "role_in_replica": "head" if i == 0 else "worker",
+            "instance_id": instance_id,
+            "role_in_instance": "head" if i == 0 else "worker",
             "ray": ray,
             "model": model,
             "layout": {
@@ -164,12 +164,12 @@ def build_replica_plan(
             "gpu_memory_utilization": head_cfg.get("gpu_memory_utilization", 0.85),
             "dtype": head_cfg.get("dtype", "auto"),
             "vllm_args": vllm_args_for(),
-            "env": _replica_env(effective_by_node.get(node.node_id, {})),
+            "env": _instance_env(effective_by_node.get(node.node_id, {})),
         }
         commands.append((node.node_id, body))
 
     return {
-        "replica_id": replica_id,
+        "instance_id": instance_id,
         "layout": {k: layout[k] for k in ("tp", "pp", "world", "head_id", "ordered_ids")},
         "head_id": layout["head_id"],
         "port": port,
@@ -178,8 +178,8 @@ def build_replica_plan(
     }
 
 
-def _replica_env(cfg: dict) -> dict:
-    """Per-node NCCL/fabric env for the replica, from that node's effective config."""
+def _instance_env(cfg: dict) -> dict:
+    """Per-node NCCL/fabric env for the instance, from that node's effective config."""
     env = {}
     mapping = {
         "nccl_socket_ifname": "NCCL_SOCKET_IFNAME",

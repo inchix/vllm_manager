@@ -2,7 +2,7 @@
 
 Real implementations for the parts we can validate now (config/power-cap, storage mount,
 modelfsd serve, model sync, GPU telemetry) and a coherent Ray+vLLM launch path for
-``ensure_replica`` that mirrors the v0.3.0 command line (docs/04). The multi-node launch path is
+``ensure_instance`` that mirrors the v0.3.0 command line (docs/04). The multi-node launch path is
 implemented but has not yet been hardware-validated through the agent (that is Phase 4 in
 docs/06); every command reports a structured ok/error result so the admin sees the truth.
 
@@ -31,7 +31,7 @@ def _run(cmd: list, timeout: int = 60) -> tuple:
 
 class Runner:
     def __init__(self):
-        self._replicas: dict = {}     # replica_id -> {procs: [Popen], role, port, state}
+        self._instances: dict = {}     # instance_id -> {procs: [Popen], role, port, state}
         self._shares: dict = {}       # export path -> {proc, endpoint, port}
         self._mounts: dict = {}       # path -> {source, ok}
 
@@ -116,9 +116,9 @@ class Runner:
             })
         return gpus
 
-    def replica_states(self) -> list:
+    def instance_states(self) -> list:
         out = []
-        for rid, r in self._replicas.items():
+        for rid, r in self._instances.items():
             alive = any(p.poll() is None for p in r["procs"])
             state = "SERVING" if alive else ("FAILED" if r.get("state") != "STOPPED" else "STOPPED")
             out.append({"id": rid, "state": state, "port": r.get("port"),
@@ -334,12 +334,12 @@ class Runner:
             return {"ok": False, "error": tail[0]}
         return {"ok": True, "detail": f"synced {repo} -> {dest}"}
 
-    # -- replica lifecycle (Ray + vLLM) ----------------------------------
-    def ensure_replica(self, body: dict) -> dict:
-        rid = body["replica_id"]
-        if rid in self._replicas and any(p.poll() is None for p in self._replicas[rid]["procs"]):
+    # -- instance lifecycle (Ray + vLLM) ----------------------------------
+    def ensure_instance(self, body: dict) -> dict:
+        rid = body["instance_id"]
+        if rid in self._instances and any(p.poll() is None for p in self._instances[rid]["procs"]):
             return {"ok": True, "state": "SERVING", "detail": "already running"}
-        role = body.get("role_in_replica", "head")
+        role = body.get("role_in_instance", "head")
         ray = body.get("ray", {})
         env = dict(os.environ)
         env.update({k: str(v) for k, v in (body.get("env") or {}).items()})
@@ -375,7 +375,7 @@ class Runner:
             if rc != 0:
                 return {"ok": False, "error": f"ray worker join failed: {err.strip()}"}
 
-        self._replicas[rid] = {"procs": procs, "role": role, "port": body.get("port"),
+        self._instances[rid] = {"procs": procs, "role": role, "port": body.get("port"),
                                "state": "SERVING", "executor": executor}
         return {"ok": True, "state": "SERVING",
                 "detail": f"{role}/{executor} up"
@@ -399,8 +399,8 @@ class Runner:
             cmd.append(a)
         return cmd
 
-    def stop_replica(self, replica_id: str, ray: bool = True) -> dict:
-        r = self._replicas.get(replica_id)
+    def stop_instance(self, instance_id: str, ray: bool = True) -> dict:
+        r = self._instances.get(instance_id)
         if not r:
             return {"ok": True, "detail": "not running here"}
         for p in r["procs"]:
@@ -416,7 +416,7 @@ class Runner:
         return {"ok": True, "detail": "stopped"}
 
     def shutdown(self):
-        for rid in list(self._replicas):
-            self.stop_replica(rid, ray=True)
+        for rid in list(self._instances):
+            self.stop_instance(rid, ray=True)
         for path in list(self._shares):
             self.unshare_storage({"export_dir": path})

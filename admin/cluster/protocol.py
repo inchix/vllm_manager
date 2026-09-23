@@ -38,8 +38,8 @@ EVENT = "event"
 # admin -> agent
 HELLO = "hello"
 SET_CONFIG = "set_config"
-ENSURE_REPLICA = "ensure_replica"
-STOP_REPLICA = "stop_replica"
+ENSURE_INSTANCE = "ensure_instance"
+STOP_INSTANCE = "stop_instance"
 MOUNT_STORAGE = "mount_storage"
 UNMOUNT_STORAGE = "unmount_storage"
 SERVE_STORAGE = "serve_storage"
@@ -50,12 +50,12 @@ BYE = "bye"
 
 AGENT_FRAMES = {REGISTER, HEARTBEAT, TELEMETRY, ACK, RESULT, EVENT}
 ADMIN_FRAMES = {
-    HELLO, SET_CONFIG, ENSURE_REPLICA, STOP_REPLICA, MOUNT_STORAGE,
+    HELLO, SET_CONFIG, ENSURE_INSTANCE, STOP_INSTANCE, MOUNT_STORAGE,
     UNMOUNT_STORAGE, SERVE_STORAGE, UNSHARE_STORAGE, SYNC_MODEL, ERROR, BYE,
 }
 # Commands the admin sends that expect a matching ack + result (by reply_to).
 COMMAND_FRAMES = {
-    ENSURE_REPLICA, STOP_REPLICA, MOUNT_STORAGE, UNMOUNT_STORAGE,
+    ENSURE_INSTANCE, STOP_INSTANCE, MOUNT_STORAGE, UNMOUNT_STORAGE,
     SERVE_STORAGE, UNSHARE_STORAGE, SYNC_MODEL, SET_CONFIG,
 }
 
@@ -242,11 +242,11 @@ def heartbeat(seq: int, uptime: float, load: Optional[list] = None) -> dict:
     return make_frame(HEARTBEAT, {"seq": seq, "uptime": uptime, "load": load or []})
 
 
-def telemetry(gpus: list, replicas: list, mounts: list,
+def telemetry(gpus: list, instances: list, mounts: list,
               volumes: Optional[list] = None, shares: Optional[list] = None) -> dict:
     return make_frame(TELEMETRY, {
         "gpus": [g.to_dict() if isinstance(g, GpuInfo) else g for g in gpus],
-        "replicas": replicas,
+        "instances": instances,
         "mounts": mounts,
         "volumes": volumes or [],   # share candidates (storage role)
         "shares": shares or [],     # currently exported: {path, endpoint, ok}

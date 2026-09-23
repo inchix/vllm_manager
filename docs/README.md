@@ -34,9 +34,9 @@ SSH/manual orchestration with a small command-and-control protocol and composabl
 A node advertises a **set of roles** — any of `admin`, `participant`, `storage` — and runs one
 lightweight **agent**. Every agent dials the **admin control plane** over an authenticated,
 outbound **WebSocket** (the *Cluster Control Protocol*, "CCP"), registers its GPU/RDMA
-inventory, streams heartbeat + telemetry, and receives typed commands (`start_replica`,
+inventory, streams heartbeat + telemetry, and receives typed commands (`start_instance`,
 `join_ray`, `mount_storage`, `sync_model`, `stop`). The admin is the brain; it schedules
-distributed vLLM replicas onto participants, coordinates model mounts from `storage` nodes, and
+distributed vLLM instances onto participants, coordinates model mounts from `storage` nodes, and
 detects a dead node the instant its heartbeat stops — so a box that hard-resets (see the ebola
 saga) **auto-rejoins on reconnect** instead of needing a manual restart. The actual tensor
 traffic still rides **Ray + NCCL over RoCE**, and model bytes are served by **`modelfsd`**, a

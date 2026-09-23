@@ -163,12 +163,12 @@ class Agent:
             self.runner.apply_config(eff)
         except Exception as exc:  # noqa: BLE001
             log.debug("apply_config: %s", exc)
-        # reconcile desired replicas
-        for rbody in (body.get("desired_state") or {}).get("replicas", []):
+        # reconcile desired instances
+        for rbody in (body.get("desired_state") or {}).get("instances", []):
             try:
-                self.runner.ensure_replica(rbody)
+                self.runner.ensure_instance(rbody)
             except Exception as exc:  # noqa: BLE001
-                log.warning("reconcile replica failed: %s", exc)
+                log.warning("reconcile instance failed: %s", exc)
 
     async def _heartbeat_loop(self, ws):
         while True:
@@ -179,7 +179,7 @@ class Agent:
     async def _telemetry_loop(self, ws):
         while True:
             frame = protocol.telemetry(self.runner.gpu_telemetry(),
-                                       self.runner.replica_states(),
+                                       self.runner.instance_states(),
                                        self.runner.mount_states(),
                                        volumes=self.runner.volumes(),
                                        shares=self.runner.share_states())
@@ -214,10 +214,10 @@ class Agent:
 
     def _exec_command(self, ftype: str, body: dict) -> dict:
         r = self.runner
-        if ftype == protocol.ENSURE_REPLICA:
-            return r.ensure_replica(body)
-        if ftype == protocol.STOP_REPLICA:
-            return r.stop_replica(body["replica_id"], ray=body.get("ray", True))
+        if ftype == protocol.ENSURE_INSTANCE:
+            return r.ensure_instance(body)
+        if ftype == protocol.STOP_INSTANCE:
+            return r.stop_instance(body["instance_id"], ray=body.get("ray", True))
         if ftype == protocol.MOUNT_STORAGE:
             return r.mount_storage(body)
         if ftype == protocol.UNMOUNT_STORAGE:

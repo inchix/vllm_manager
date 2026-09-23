@@ -60,7 +60,7 @@ if present.
 - On registration and on any change, the admin computes each node's **effective config** and
   sends it in the CCP `hello` / `desired_state` (see [02-control-plane](02-control-plane.md)).
 - The agent applies it locally (exports the env for Ray/NCCL/vLLM, sets power caps, etc.) when it
-  starts a replica.
+  starts an instance.
 - `.env` still works as the **bootstrap** for a node (how the agent finds the admin and its
   `cluster_id`/roles before it has ever connected) and as the fallback when the control plane is
   off. Once connected, admin config takes precedence for the managed settings.
@@ -127,7 +127,7 @@ Cluster ▸ Configuration
   *differences* the only thing you type.
 - An **effective-config preview** shows the merged result before saving, so there's no guessing.
 - Save pushes to the admin; the admin recomputes effective config and sends it to the affected
-  agents. Changes take effect on the **next replica start** for launch-time settings; live-safe
+  agents. Changes take effect on the **next instance start** for launch-time settings; live-safe
   settings (e.g. power cap) can apply immediately.
 - `setup.sh` still seeds a sensible starting config; the UI is where you refine per-node.
 
@@ -136,6 +136,6 @@ Cluster ▸ Configuration
 - The admin validates overrides (e.g. `GLOO_SOCKET_IFNAME` must be a single interface; a NIC must
   exist in the node's detected list, or be flagged as a manual pin).
 - Secrets (HF token) are write-only fields, never echoed back, never logged (carried from PR #1).
-- An invalid per-node override is rejected at save with the reason, not discovered at replica
+- An invalid per-node override is rejected at save with the reason, not discovered at instance
   launch.
 - Read-only "effective config" export per node (for support/repro), with secrets redacted.

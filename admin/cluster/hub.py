@@ -6,8 +6,8 @@ Provides a FastAPI router with:
   * ``GET /api/cluster/config`` layered config snapshot (defaults + per-node)
   * ``POST /api/cluster/config`` update defaults / per-node overrides, pushed to agents
   * ``GET /api/cluster/summary`` quick counts
-  * ``POST /api/cluster/launch`` schedule a distributed replica across participants (Phase 2)
-  * ``POST /api/cluster/stop``   stop a replica
+  * ``POST /api/cluster/launch`` schedule a distributed instance across participants (Phase 2)
+  * ``POST /api/cluster/stop``   stop an instance
 
 The hub owns a Registry and a ClusterConfigStore, tracks one live WebSocket per node, and runs a
 background sweep that promotes silent nodes to DOWN.
@@ -46,7 +46,7 @@ class ClusterHub:
         self.agent_version = agent_version
         self._conns: dict = {}                 # node_id -> WebSocket
         self._pending: dict = {}               # frame id -> asyncio.Future (result)
-        self._replicas: dict = {}              # replica_id -> plan metadata
+        self._instances: dict = {}              # instance_id -> plan metadata
         self._sweep_task: Optional[asyncio.Task] = None
         self._stop = False
 
@@ -179,8 +179,8 @@ class ClusterHub:
             await asyncio.sleep(2)
 
     def _on_node_down(self, node_id: str):
-        # mark any replica that depends on this node as failed (hold+alert policy, docs/06)
-        for rid, meta in self._replicas.items():
+        # mark any instance that depends on this node as failed (hold+alert policy, docs/06)
+        for rid, meta in self._instances.items():
             if node_id in meta.get("node_ids", []) and meta.get("state") != "FAILED":
                 meta["state"] = "FAILED"
                 meta["detail"] = f"node {node_id} went down"
@@ -277,7 +277,7 @@ class ClusterHub:
             self.registry.on_heartbeat(node_id, body.get("seq", -1))
         elif ftype == protocol.TELEMETRY:
             self.registry.on_telemetry(node_id, body.get("gpus", []),
-                                       body.get("replicas", []), body.get("mounts", []),
+                                       body.get("instances", []), body.get("mounts", []),
                                        volumes=body.get("volumes"),
                                        shares=body.get("shares"))
         elif ftype in (protocol.RESULT, protocol.ACK):
@@ -291,12 +291,12 @@ class ClusterHub:
             self.registry.register(body)  # re-register (reconnect handled elsewhere)
 
     def _desired_state(self, node_id: str) -> dict:
-        """Replicas this node should be running (for reconciliation)."""
+        """Instances this node should be running (for reconciliation)."""
         want = []
-        for rid, meta in self._replicas.items():
+        for rid, meta in self._instances.items():
             if node_id in meta.get("bodies", {}) and meta.get("state") not in ("STOPPED", "FAILED"):
                 want.append(meta["bodies"][node_id])
-        return {"replicas": want}
+        return {"instances": want}
 
     # -- config push ------------------------------------------------------
     async def push_config(self, node_ids: Optional[list] = None) -> None:
@@ -313,15 +313,15 @@ class ClusterHub:
     # -- launch / stop (Phase 2 scaffold) --------------------------------
     def plan(self, model: str, node_ids: list, *, port: int,
              num_layers: Optional[int] = None, **kw) -> dict:
-        """Compute the replica plan WITHOUT executing it (dry run for the UI)."""
+        """Compute the instance plan WITHOUT executing it (dry run for the UI)."""
         nodes = [self.registry.get(n) for n in node_ids]
         nodes = [n for n in nodes if n is not None]
         if not nodes:
             return {"ok": False, "error": "no such participant nodes"}
         eff_by = {n.node_id: self.config.effective(n.node_id, n.detected) for n in nodes}
         try:
-            plan = scheduler.build_replica_plan(
-                kw.pop("replica_id", "plan-preview"), nodes, model, eff_by,
+            plan = scheduler.build_instance_plan(
+                kw.pop("instance_id", "plan-preview"), nodes, model, eff_by,
                 port=port, num_layers=num_layers, **kw)
         except scheduler.ScheduleError as exc:
             return {"ok": False, "error": str(exc)}
@@ -331,7 +331,7 @@ class ClusterHub:
 
     async def _coordinate_storage(self, participants: list) -> dict:
         """Ensure a storage node is serving and each participant has the model mounted
-        at the canonical path before a replica loads weights (docs/01, docs/03)."""
+        at the canonical path before an instance loads weights (docs/01, docs/03)."""
         storage = self.registry.storage_nodes(alive_only=True)
         if not storage:
             return {"ok": True, "detail": "no storage role; assuming models are local"}
@@ -375,14 +375,14 @@ class ClusterHub:
                 return {"ok": False, "error": "storage coordination failed",
                         "storage": storage_res}
         eff_by = {n.node_id: self.config.effective(n.node_id, n.detected) for n in nodes}
-        replica_id = kw.pop("replica_id", None) or f"replica-{len(self._replicas) + 1}"
+        instance_id = kw.pop("instance_id", None) or f"instance-{len(self._instances) + 1}"
         try:
-            plan = scheduler.build_replica_plan(
-                replica_id, nodes, model, eff_by, port=port, num_layers=num_layers, **kw)
+            plan = scheduler.build_instance_plan(
+                instance_id, nodes, model, eff_by, port=port, num_layers=num_layers, **kw)
         except scheduler.ScheduleError as exc:
             return {"ok": False, "error": str(exc)}
         bodies = {nid: body for nid, body in plan["commands"]}
-        self._replicas[replica_id] = {
+        self._instances[instance_id] = {
             "state": "STARTING", "node_ids": [n.node_id for n in nodes],
             "bodies": bodies, "layout": plan["layout"], "port": port, "model": model,
         }
@@ -390,23 +390,23 @@ class ClusterHub:
         order = [nid for nid in plan["layout"]["ordered_ids"]][::-1]
         results = {}
         for nid in order:
-            frame = protocol.make_frame(protocol.ENSURE_REPLICA, bodies[nid])
+            frame = protocol.make_frame(protocol.ENSURE_INSTANCE, bodies[nid])
             results[nid] = await self.send_command(nid, frame, timeout=kw.get("timeout", 300))
         ok = all(r.get("ok") for r in results.values())
-        self._replicas[replica_id]["state"] = "SERVING" if ok else "FAILED"
-        return {"ok": ok, "replica_id": replica_id, "layout": plan["layout"], "results": results}
+        self._instances[instance_id]["state"] = "SERVING" if ok else "FAILED"
+        return {"ok": ok, "instance_id": instance_id, "layout": plan["layout"], "results": results}
 
-    async def stop_replica(self, replica_id: str, ray: bool = True) -> dict:
-        meta = self._replicas.get(replica_id)
+    async def stop_instance(self, instance_id: str, ray: bool = True) -> dict:
+        meta = self._instances.get(instance_id)
         if not meta:
-            return {"ok": False, "error": "no such replica"}
+            return {"ok": False, "error": "no such instance"}
         results = {}
         for nid in meta.get("node_ids", []):
-            frame = protocol.make_frame(protocol.STOP_REPLICA,
-                                        {"replica_id": replica_id, "ray": ray})
+            frame = protocol.make_frame(protocol.STOP_INSTANCE,
+                                        {"instance_id": instance_id, "ray": ray})
             results[nid] = await self.send_command(nid, frame, timeout=60)
         meta["state"] = "STOPPED"
-        return {"ok": True, "replica_id": replica_id, "results": results}
+        return {"ok": True, "instance_id": instance_id, "results": results}
 
     # -- role management --------------------------------------------------
     async def set_roles(self, node_id: str, roles: list) -> dict:
@@ -427,10 +427,10 @@ class ClusterHub:
             if not others:
                 return {"ok": False, "error": "refusing to remove the only admin role"}
         if protocol.ROLE_PARTICIPANT in node.roles and protocol.ROLE_PARTICIPANT not in roles:
-            busy = [r for r in (node.replicas or []) if r.get("state") == "SERVING"]
+            busy = [r for r in (node.instances or []) if r.get("state") == "SERVING"]
             if busy:
                 return {"ok": False,
-                        "error": "node is serving %d replica(s); stop them first" % len(busy)}
+                        "error": "node is serving %d instance(s); stop them first" % len(busy)}
         # Losing storage: stop any exports first so we don't strand mounts.
         dropped_storage = (protocol.ROLE_STORAGE in node.roles
                            and protocol.ROLE_STORAGE not in roles)
@@ -596,7 +596,7 @@ class ClusterHub:
             "roles": {r: len([n for n in alive if r in n.roles]) for r in protocol.ALL_ROLES},
             # display names for the UI; wire ids stay stable
             "role_labels": protocol.ROLE_LABELS,
-            "replicas": {rid: m.get("state") for rid, m in self._replicas.items()},
+            "instances": {rid: m.get("state") for rid, m in self._instances.items()},
         }
 
 
@@ -757,6 +757,6 @@ def build_cluster_router(hub: ClusterHub) -> APIRouter:
         if not _auth(request):
             return _UNAUTH
         d = await request.json()
-        return await hub.stop_replica(d["replica_id"], ray=d.get("ray", True))
+        return await hub.stop_instance(d["instance_id"], ray=d.get("ray", True))
 
     return router

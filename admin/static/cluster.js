@@ -5,7 +5,7 @@
  *   (A) SUMMARY (default)  — cluster totals from GET /api/cluster/summary plus
  *       a compact one-row-per-node table. Every node appears once.
  *   (B) WORKERS            — nodes whose roles include `participant`: one card
- *       per node with full per-GPU util/mem/temp/power telemetry, replicas,
+ *       per node with full per-GPU util/mem/temp/power telemetry, instances,
  *       AVAILABLE SHARES (every cluster share with a Mount checkbox for THAT
  *       node) and a collapsible NODE DETAIL (NICs, RDMA fabric, mounts).
  *       Mounting is a per-node action, so the checkbox lives on the node it
@@ -38,7 +38,7 @@
  *       rdma:    [{ hca, ports:[...], gid_index, netdev, fabric_ip }],
  *       gpus:    [{ index, model, util, mem_used, mem_total, temp,
  *                   power_draw, power_limit }],
- *       replicas:[{ id, state, port }],
+ *       instances:[{ id, state, port }],
  *       mounts:  [{ path, source, ok }]
  *     }, ...
  *   ]
@@ -461,7 +461,7 @@ const NETWORK_SETTINGS_FALLBACK = {
   },
   nccl_socket_ifname: {
     group: 'network', widget: 'nic-list', label: 'Compute (NCCL) network',
-    help: 'NCCL collectives between replicas. The local NIC is set first.',
+    help: 'NCCL collectives between instances. The local NIC is set first.',
   },
   gloo_socket_ifname: {
     group: 'network', widget: 'nic', label: 'Compute (Gloo) NIC',
@@ -597,7 +597,7 @@ function panelBusy(id) {
 // Derive a summary from the node list when /api/cluster/summary is unavailable.
 function deriveSummary(nodes) {
   const roles = { admin: 0, participant: 0, storage: 0 };
-  const replicas = {};
+  const instances = {};
   let gpus = 0, alive = 0;
   nodes.forEach(n => {
     if (hasRole(n, 'admin')) roles.admin++;
@@ -605,12 +605,12 @@ function deriveSummary(nodes) {
     if (hasRole(n, 'storage')) roles.storage++;
     gpus += (n.gpus || []).length;
     if (n.connected || ['ready', 'serving', 'degraded'].includes(String(n.state || '').toLowerCase())) alive++;
-    (n.replicas || []).forEach(r => {
+    (n.instances || []).forEach(r => {
       const st = (r.state || 'unknown').toUpperCase();
-      replicas[st] = (replicas[st] || 0) + 1;
+      instances[st] = (instances[st] || 0) + 1;
     });
   });
-  return { nodes_total: nodes.length, nodes_alive: alive, gpus_total: gpus, roles, replicas };
+  return { nodes_total: nodes.length, nodes_alive: alive, gpus_total: gpus, roles, instances };
 }
 
 function renderLiveOffline(detail) {
@@ -643,7 +643,7 @@ function renderSummary(summary, nodes) {
   const el = $('summary-content');
   const s = summary || {};
   const roles = s.roles || {};
-  const replicaTotal = Object.values(s.replicas || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+  const instanceTotal = Object.values(s.instances || {}).reduce((a, b) => a + (Number(b) || 0), 0);
 
   const tile = (val, label) =>
     `<div class="stat-tile"><span class="stat-val">${val}</span><span class="stat-label">${escapeHtml(label)}</span></div>`;
@@ -659,7 +659,7 @@ function renderSummary(summary, nodes) {
       ${tile(roles.participant != null ? roles.participant : 0, roleLabel('participant'))}
       ${tile(roles.storage != null ? roles.storage : 0, roleLabel('storage'))}
       ${tile(roles.admin != null ? roles.admin : 0, roleLabel('admin'))}
-      ${tile(replicaTotal, 'Replicas')}
+      ${tile(instanceTotal, 'Instances')}
     </div>`;
 
   let table;
@@ -1116,9 +1116,9 @@ function renderNode(host, n) {
        </div>`
     : '<div class="muted">No GPU telemetry.</div>';
 
-  const replicas = (n.replicas || []).length
-    ? `<div class="sub-section"><div class="sub-title">Replicas</div><div class="chip-row">${
-        n.replicas.map(r => `<span class="chip">${escapeHtml(r.id)} <span class="dim">${escapeHtml(r.state || '')}${r.port ? ' :' + r.port : ''}</span></span>`).join('')
+  const instances = (n.instances || []).length
+    ? `<div class="sub-section"><div class="sub-title">Instances</div><div class="chip-row">${
+        n.instances.map(r => `<span class="chip">${escapeHtml(r.id)} <span class="dim">${escapeHtml(r.state || '')}${r.port ? ' :' + r.port : ''}</span></span>`).join('')
       }</div></div>`
     : '';
 
@@ -1132,7 +1132,7 @@ function renderNode(host, n) {
         ${stateBadge}
       </div>
       ${gpuRows}
-      ${replicas}
+      ${instances}
       ${renderNodeShares(n)}
       ${renderNodeDetail(n)}
     </div>`;
@@ -1304,7 +1304,7 @@ function renderConfig() {
   el.innerHTML = defaultsCard + nodeCards + `
     <div class="save-row">
       <button class="btn btn-save" id="btn-save-config" onclick="saveConfig()">Save configuration</button>
-      <span class="save-note">Launch-time settings apply on the next replica start; live-safe settings (e.g. power cap) apply immediately.</span>
+      <span class="save-note">Launch-time settings apply on the next instance start; live-safe settings (e.g. power cap) apply immediately.</span>
     </div>`;
 }
 
@@ -1580,7 +1580,7 @@ const MOCK_NODES = [
       { index: 2, model: 'Tesla V100-SXM2-32GB', util: 4, mem_used: 512, mem_total: 32768, temp: 41, power_draw: 52, power_limit: 300 },
       { index: 3, model: 'Tesla V100-SXM2-32GB', util: 0, mem_used: 3, mem_total: 32768, temp: 38, power_draw: 46, power_limit: 300 },
     ],
-    replicas: [{ id: 'devstral-r0', state: 'HEALTHY', port: 8001 }],
+    instances: [{ id: 'devstral-r0', state: 'HEALTHY', port: 8001 }],
     mounts: [{ path: '/export/models', source: 'local (served)', ok: true }],
   },
   {
@@ -1601,7 +1601,7 @@ const MOCK_NODES = [
       { index: 0, model: 'Tesla V100-PCIE-16GB', util: 88, mem_used: 15100, mem_total: 16384, temp: 86, power_draw: 148, power_limit: 150 },
       { index: 1, model: 'Tesla V100-PCIE-16GB', util: 0, mem_used: 4, mem_total: 16384, temp: 44, power_draw: 33, power_limit: 150 },
     ],
-    replicas: [{ id: 'devstral-r0', state: 'FAILED', port: 8001 }],
+    instances: [{ id: 'devstral-r0', state: 'FAILED', port: 8001 }],
     mounts: [
       { path: '/models', source: 'covid:/models', ok: true },
       { path: '/export/models', source: 'covid:/export/models', ok: false },
@@ -1703,7 +1703,7 @@ const MOCK_SUMMARY = {
   roles: { admin: 1, participant: 2, storage: 1 },
   // Display names for the wire role ids, as the control plane now sends them.
   role_labels: { admin: 'Admin', participant: 'GPU Worker', storage: 'Storage' },
-  replicas: { HEALTHY: 1, FAILED: 1 },
+  instances: { HEALTHY: 1, FAILED: 1 },
 };
 
 const MOCK_CONFIG = {
@@ -1730,7 +1730,7 @@ const MOCK_CONFIG = {
     },
     nccl_socket_ifname: {
       group: 'network', widget: 'nic-list', label: 'Compute (NCCL) network',
-      help: 'NCCL collectives between replicas. The local NIC is set first; the cluster appends the rest.',
+      help: 'NCCL collectives between instances. The local NIC is set first; the cluster appends the rest.',
     },
     gloo_socket_ifname: {
       group: 'network', widget: 'nic', label: 'Compute (Gloo) NIC',

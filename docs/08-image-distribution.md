@@ -4,14 +4,14 @@ How the cluster's container image gets built once and onto every node identicall
 
 ## Why identical images matter
 
-A multi-node vLLM replica is not "several servers that cooperate" — it is **one** process group
+A multi-node vLLM instance is not "several servers that cooperate" — it is **one** process group
 whose members exchange tensors directly. Three layers all assume their peers are the same build:
 
 - **Ray** version-checks on join. A worker whose `ray` differs from the head's is refused, or
   worse, joins and then deserializes an object it does not understand.
 - **NCCL** negotiates collectives across the RoCE fabric. Mismatched NCCL/torch builds can
   complete the handshake and then hang in the middle of an all-reduce, with no error — the
-  symptom is a replica that loads weights and then simply stops.
+  symptom is an instance that loads weights and then simply stops.
 - **vLLM** splits the model by tensor/pipeline rank. Two vLLM versions can lay out or shard a
   model differently, so rank 0 and rank 1 disagree about what the bytes mean.
 
@@ -144,7 +144,7 @@ ghcr.io/inchix/vllm_manager@sha256:1a2b3c…
    sudo podman image inspect --format '{{.Digest}}' vllm-manager:latest
    ```
 
-   Same digest on every box, or stop and fix it before launching a distributed replica.
+   Same digest on every box, or stop and fix it before launching a distributed instance.
 
 ## Air-gapped fallback
 
