@@ -4,20 +4,27 @@
  * Renders four tabs on cluster.html, organized BY ROLE:
  *   (A) SUMMARY (default)  — cluster totals from GET /api/cluster/summary plus
  *       a compact one-row-per-node table. Every node appears once.
- *   (B) WORKERS            — nodes whose roles include `participant`: a
- *       CLUSTER SHARES matrix (every share × every participant, with a Mount
- *       checkbox per cell) followed by full per-GPU util/mem/temp/power
- *       telemetry cards + replicas. Polls ~3s.
- *   (C) STORAGE            — nodes whose roles include `storage`: the node's
- *       VOLUMES (path/fs/size/used/free) each with a Share checkbox. No GPUs
- *       here — a storage node that also participates shows its GPUs under
- *       Workers. Polls ~3s.
- *   (D) CLUSTER CONFIGURATION — cluster defaults + one card per node, each
- *       setting showing DETECTED (read-only) vs OVERRIDE (input), a merged
+ *   (B) WORKERS            — nodes whose roles include `participant`: one card
+ *       per node with full per-GPU util/mem/temp/power telemetry, replicas,
+ *       AVAILABLE SHARES (every cluster share with a Mount checkbox for THAT
+ *       node) and a collapsible NODE DETAIL (NICs, RDMA fabric, mounts).
+ *       Mounting is a per-node action, so the checkbox lives on the node it
+ *       acts on rather than in a cluster-wide matrix. Polls ~3s.
+ *   (C) STORAGE            — nodes whose roles include `storage`: the NIC the
+ *       node serves shares on, then its VOLUMES (path/fs/size/used/free) each
+ *       with a Share checkbox. No GPUs here — a storage node that also
+ *       participates shows its GPUs under Workers. Polls ~3s.
+ *   (D) CLUSTER CONFIGURATION — cluster defaults + one card per node: a
+ *       NETWORKS block (one NIC picker per traffic type) then each setting
+ *       showing DETECTED (read-only) vs OVERRIDE (input), a merged
  *       effective-config preview, and a Save button.
  *
  * Role filtering is by MEMBERSHIP, not exclusivity: a node with roles
  * {participant,storage} shows under BOTH Workers and Storage.
+ *
+ * Role ids are wire values (`participant`, `storage`, `admin`) and are what
+ * every filter matches on; what people read comes from summary.role_labels
+ * via roleLabel() — `participant` displays as "GPU Worker".
  *
  * ---------------------------------------------------------------------------
  * API CONTRACT (assumed — endpoints may not exist yet; the UI degrades
@@ -284,6 +291,32 @@ function hasRole(n, role) {
 }
 
 /* -------------------------------------------------------------------------
+ * ROLE LABELS — presentation only.
+ *
+ * The wire ids (`participant`, `storage`, `admin`) are what .env files, saved
+ * per-node config and join tokens carry, so every hasRole() filter keeps using
+ * them. What people READ comes from GET /api/cluster/summary -> role_labels,
+ * which is how `participant` displays as "GPU Worker"; a future rename lands
+ * in the UI with no code change. The fallback map keeps an older control plane
+ * that sends no role_labels reading correctly, and an unknown role falls back
+ * to its raw id.
+ * ---------------------------------------------------------------------- */
+const ROLE_LABELS_FALLBACK = { admin: 'Admin', participant: 'GPU Worker', storage: 'Storage' };
+let roleLabels = {};
+
+function roleLabel(r) {
+  const raw = String(r == null ? '' : r).trim();
+  const lk = raw.toLowerCase();
+  return roleLabels[lk] || roleLabels[raw] || ROLE_LABELS_FALLBACK[lk] || raw;
+}
+
+// Role badges for a node, labelled for display.
+function roleBadges(roles) {
+  return (roles || []).map(r =>
+    `<span class="badge role-badge" title="${escapeHtml(String(r))}">${escapeHtml(roleLabel(r))}</span>`).join(' ');
+}
+
+/* -------------------------------------------------------------------------
  * NETWORK INTERFACES
  *
  * Nodes report every interface the agent can see, container plumbing
@@ -399,6 +432,13 @@ function refreshLive() { loadLive(); }
 function renderLive(summary, nodes) {
   nodesById = {};
   nodes.forEach(n => { if (n && n.node_id) nodesById[n.node_id] = n; });
+  // Display names for the wire role ids; kept from the last summary that
+  // carried them so every tab (Configuration included) labels roles alike.
+  if (summary && summary.role_labels && typeof summary.role_labels === 'object') {
+    roleLabels = summary.role_labels;
+  }
+  const workersRoleEl = $('workers-role-label');
+  if (workersRoleEl) workersRoleEl.textContent = roleLabel('participant') + ' nodes';
   renderSummary(summary, nodes);
   renderWorkers(nodes);
   renderStorage(nodes);
@@ -616,9 +656,9 @@ function renderSummary(summary, nodes) {
         <span class="stat-label">Nodes alive</span>
       </div>
       ${tile(num(s.gpus_total), 'GPUs total')}
-      ${tile(roles.participant != null ? roles.participant : 0, 'Participant')}
-      ${tile(roles.storage != null ? roles.storage : 0, 'Storage')}
-      ${tile(roles.admin != null ? roles.admin : 0, 'Admin')}
+      ${tile(roles.participant != null ? roles.participant : 0, roleLabel('participant'))}
+      ${tile(roles.storage != null ? roles.storage : 0, roleLabel('storage'))}
+      ${tile(roles.admin != null ? roles.admin : 0, roleLabel('admin'))}
       ${tile(replicaTotal, 'Replicas')}
     </div>`;
 
@@ -628,7 +668,7 @@ function renderSummary(summary, nodes) {
   } else {
     const rows = nodes.map(n => {
       const a = nodeAgg(n);
-      const roleBadges = (n.roles || []).map(r => `<span class="badge role-badge">${escapeHtml(r)}</span>`).join(' ');
+      const badges = roleBadges(n.roles);
       const st = (n.state || 'unknown').toUpperCase();
       const stCls = stateClass(n.state);
       const memCell = a.memTotal > 0 ? `${fmtMb(a.memUsed)} / ${fmtMb(a.memTotal)}` : '—';
@@ -637,7 +677,7 @@ function renderSummary(summary, nodes) {
         <tr>
           <td class="mono">${escapeHtml(n.node_id || '')}</td>
           <td>${escapeHtml(n.hostname || '')}</td>
-          <td>${roleBadges || '<span class="muted">—</span>'}</td>
+          <td>${badges || '<span class="muted">—</span>'}</td>
           <td><span class="badge state-badge ${stCls}"><span class="state-dot"></span>${escapeHtml(st)}</span></td>
           <td class="num">${a.count}</td>
           <td class="mono">${utilCell} util · ${memCell}</td>
@@ -663,7 +703,8 @@ function renderWorkers(nodes) {
   if (panelBusy('workers-content')) return;
   const workers = nodes.filter(n => hasRole(n, 'participant'));
   if (!workers.length) {
-    el.innerHTML = '<div class="banner banner-empty">No participant (worker) nodes registered.</div>';
+    el.innerHTML = '<div class="banner banner-empty">No ' + escapeHtml(roleLabel('participant')) +
+      ' nodes registered.</div>';
     return;
   }
   el.innerHTML = workers.map(n => renderNode(n.hostname || n.node_id || 'unknown', n)).join('');
@@ -775,7 +816,7 @@ function storageRowsFor(nodeId) {
 function renderStorageNode(n) {
   const host = n.hostname || n.node_id || 'unknown';
   const nodeId = n.node_id || '';
-  const roles = (n.roles || []).map(r => `<span class="badge role-badge">${escapeHtml(r)}</span>`).join('');
+  const roles = roleBadges(n.roles);
   const st = (n.state || 'unknown').toUpperCase();
   const stCls = stateClass(n.state);
   const stateBadge = `<span class="badge state-badge ${stCls}"><span class="state-dot"></span>${escapeHtml(st)}</span>`;
@@ -1062,7 +1103,7 @@ function fmtBytes(b) {
 }
 
 function renderNode(host, n) {
-  const roles = (n.roles || []).map(r => `<span class="badge role-badge">${escapeHtml(r)}</span>`).join('');
+  const roles = roleBadges(n.roles);
   const st = (n.state || 'unknown').toUpperCase();
   const stCls = stateClass(n.state);
   const serving = stCls === 'state-serving' ? ' state-serving-anim' : '';
@@ -1291,8 +1332,7 @@ function renderNodeCard(nodeId) {
   const detected = node.detected || {};
   const overrides = node.overrides || {};
   const roles = detected.roles || overrides.roles || '';
-  const roleBadges = String(roles).split(',').filter(Boolean)
-    .map(r => `<span class="badge role-badge">${escapeHtml(r.trim())}</span>`).join('');
+  const badges = roleBadges(String(roles).split(',').map(r => r.trim()).filter(Boolean));
 
   const netKeys = networkKeySet();
   const groups = SETTING_GROUPS.map(group => {
@@ -1318,7 +1358,7 @@ function renderNodeCard(nodeId) {
         <div class="node-title">
           <h2>${escapeHtml(node.hostname || nodeId)}</h2>
           <span class="host-id">${escapeHtml(nodeId)}</span>
-          ${roleBadges}
+          ${badges}
         </div>
       </div>
       ${renderNetworksBlock(nodeId)}
@@ -1661,6 +1701,8 @@ const MOCK_SUMMARY = {
   nodes_alive: 2,
   gpus_total: 6,
   roles: { admin: 1, participant: 2, storage: 1 },
+  // Display names for the wire role ids, as the control plane now sends them.
+  role_labels: { admin: 'Admin', participant: 'GPU Worker', storage: 'Storage' },
   replicas: { HEALTHY: 1, FAILED: 1 },
 };
 

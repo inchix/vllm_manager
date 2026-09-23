@@ -207,14 +207,10 @@ a:hover { text-decoration: underline; }
 .summary-table .badge { margin-right: 2px; }
 
 /* ---- Storage: volumes table + share/mount controls ---- */
-.section-title { font-size: 1rem; color: var(--text-subheading); margin: 0; }
-.shares-panel { padding-bottom: 14px; }
-.shares-panel .card-head { margin-bottom: 10px; }
-
-/* Both the volumes table (Storage) and the cluster-shares matrix (Workers)
-   reuse .summary-table so they sit flush with the rest of the admin UI. */
-.vol-table td, .shares-table td { vertical-align: top; }
-.vol-table .num, .shares-table .num { white-space: nowrap; }
+/* The volumes table reuses .summary-table so it sits flush with the rest of
+   the admin UI. */
+.vol-table td { vertical-align: top; }
+.vol-table .num { white-space: nowrap; }
 .share-endpoint { font-size: 0.75rem; color: var(--text-muted); margin-top: 3px; word-break: break-all; }
 .custom-badge { background: var(--bg-code); color: var(--warning-border); border: 1px solid var(--warning-border); margin-left: 6px; }
 .vol-custom td:first-child { border-left: 2px solid var(--warning-border); }
@@ -226,14 +222,21 @@ a:hover { text-decoration: underline; }
 .chk-label { font-size: 0.75rem; color: var(--text-secondary); }
 .summary-table td.num .chk { justify-content: flex-end; }
 
-/* Cluster-shares matrix: one column per participant */
-.shares-table th.mount-col { white-space: nowrap; }
-.shares-table th.mount-col .col-sub { font-size: 0.65rem; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--text-muted); font-family: ui-monospace, monospace; }
-.shares-table .mount-cell { min-width: 130px; }
-.mount-state { display: block; font-size: 0.72rem; margin-top: 3px; word-break: break-all; }
+/* Available shares — one list per worker card, mount checkbox on the node it
+   acts on (replaces the old cluster-wide share × node matrix). */
+.node-shares .share-list { display: flex; flex-direction: column; gap: 3px; }
+.share-row { display: grid; grid-template-columns: 92px minmax(140px, 1.6fr) minmax(90px, 0.9fr) minmax(100px, 1fr); gap: 10px; align-items: start; padding: 7px 10px; background: var(--bg-input); border-radius: 5px; font-size: 0.8rem; }
+.share-row.header { background: transparent; padding: 0 10px 2px; color: var(--text-muted); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.03em; }
+.share-row .mono { font-family: ui-monospace, monospace; word-break: break-all; }
+.share-row .dim { color: var(--text-muted); }
+.share-row .bad { color: #f44336; }
+.share-what { display: flex; flex-direction: column; gap: 2px; }
+.share-src { font-size: 0.72rem; word-break: break-all; }
+.share-size { white-space: nowrap; font-size: 0.78rem; }
+.share-row .chk-label { font-size: 0.72rem; }
+.mount-state { display: block; font-size: 0.72rem; word-break: break-all; }
 .mount-state.mono { font-family: ui-monospace, monospace; color: var(--text-secondary); }
-.shares-table .dim { color: var(--text-muted); }
-.shares-table .bad, .mount-state.bad { color: #f44336; }
+.mount-state.bad { color: #f44336; }
 
 /* Add-share row */
 .add-share { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-card); }
@@ -318,9 +321,13 @@ button.btn { padding: 9px 20px; border: none; border-radius: 6px; font-size: 0.9
   .storage-row { grid-template-columns: 24px 1fr; }
   .storage-row .mono.dim { grid-column: 2 / -1; }
   .storage-row.header { display: none; }
-  /* Volumes / shares tables stay tabular but scroll inside .table-wrap. */
+  /* Volumes table stays tabular but scrolls inside .table-wrap. */
   .summary-table th, .summary-table td { padding: 8px 10px; }
-  .shares-table .mount-cell { min-width: 108px; }
+  /* Share rows: mount | share  over  size | state */
+  .share-row { grid-template-columns: 86px minmax(0, 1fr); }
+  .share-row > span:nth-child(3) { grid-column: 1; }
+  .share-row > span:nth-child(4) { grid-column: 2; }
+  .share-row.header { display: none; }
   .add-share-label { flex: 1 1 100%; }
   .add-share input { flex: 1 1 auto; }
   /* Node detail + networks: single column, and the NIC/mount rows wrap

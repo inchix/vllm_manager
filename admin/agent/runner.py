@@ -151,9 +151,19 @@ class Runner:
             return {"ok": False, "error": "no canonical_path"}
         host = src.get("host")
         export = src.get("export", path)
+        requested = "%s:%s" % (host, export)
         if os.path.ismount(path):
-            self._mounts[path] = {"source": f"{host}:{export}"}
-            return {"ok": True, "detail": "already mounted"}
+            # Never claim a path we didn't mount. Something else (e.g. a legacy
+            # kernel NFS entry in fstab) may already own it; reporting the
+            # requested source here would make the UI show a share as mounted
+            # when it is not.
+            actual = self._actual_mount_source(path)
+            self._mounts[path] = {"source": actual or "unknown"}
+            if actual == requested:
+                return {"ok": True, "detail": "already mounted"}
+            return {"ok": False,
+                    "error": "%s is already mounted from %s (wanted %s) — unmount it first"
+                             % (path, actual or "an unknown source", requested)}
         os.makedirs(path, exist_ok=True)
         # modelfsd listens on an advertised ephemeral port, so the NFS client needs
         # both the NFS and MOUNT ports pinned to it.
@@ -165,8 +175,22 @@ class Runner:
         rc, _, err = _run(["sudo"] + cmd, timeout=30)
         ok = rc == 0 or os.path.ismount(path)
         if ok:
-            self._mounts[path] = {"source": f"{host}:{export}"}
+            # record what is ACTUALLY mounted, not what we asked for
+            self._mounts[path] = {"source": self._actual_mount_source(path) or requested}
         return {"ok": ok, "detail": "mounted" if ok else "", "error": "" if ok else err.strip()}
+
+    @staticmethod
+    def _actual_mount_source(path: str) -> Optional[str]:
+        """The device/source currently mounted at `path`, straight from the kernel."""
+        try:
+            with open("/proc/self/mounts", "r") as fh:
+                for line in fh:
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[1].replace("\\040", " ") == path:
+                        return parts[0]
+        except Exception:
+            pass
+        return None
 
     def unmount_storage(self, path: str) -> dict:
         rc, _, err = _run(["sudo", "umount", path], timeout=30)
