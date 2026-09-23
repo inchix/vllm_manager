@@ -206,6 +206,35 @@ a:hover { text-decoration: underline; }
 .summary-table .num, .summary-table th.num { text-align: right; }
 .summary-table .badge { margin-right: 2px; }
 
+/* ---- Summary: chat test (ported from the single-node UI) ---- */
+.chat-card .chat-controls { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 12px; }
+.chat-ctl { display: flex; flex-direction: column; gap: 4px; min-width: 96px; }
+.chat-ctl-wide { flex: 1 1 220px; min-width: 180px; }
+.chat-ctl-btn { justify-content: flex-end; }
+.chat-ctl label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-muted); }
+.chat-ctl select, .chat-ctl input { width: 100%; padding: 6px 8px; background: var(--bg-input); border: 1px solid var(--border-input); color: var(--text-primary); border-radius: 4px; font-size: 0.85rem; font-family: ui-monospace, monospace; }
+.chat-ctl select:focus, .chat-ctl input:focus { outline: none; border-color: var(--accent); }
+.chat-ctl select:disabled, .chat-ctl input:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.chat-messages { background: var(--bg-sunken); border: 1px solid var(--border-input); border-radius: 6px; padding: 10px; min-height: 96px; max-height: 340px; overflow-y: auto; margin-bottom: 12px; }
+.chat-placeholder { color: var(--text-muted); font-size: 0.85rem; }
+.chat-msg { margin-bottom: 10px; font-size: 0.88rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+.chat-msg:last-child { margin-bottom: 0; }
+.chat-msg .chat-role { font-weight: 600; margin-bottom: 2px; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; }
+.chat-role-user { color: var(--accent); }
+.chat-role-assistant { color: #4caf50; }
+.chat-role-tool { color: var(--warning-border); }
+.chat-pending { color: var(--text-secondary); font-size: 0.85rem; }
+.chat-tool-call { background: var(--bg-code); border: 1px solid var(--border-card); border-radius: 4px; padding: 8px; margin: 4px 0; font-family: ui-monospace, monospace; font-size: 0.78rem; white-space: pre-wrap; word-break: break-all; }
+
+.chat-input-row { display: flex; gap: 10px; }
+.chat-input-row input[type="text"] { flex: 1; min-width: 0; padding: 8px 10px; background: var(--bg-input); border: 1px solid var(--border-input); color: var(--text-primary); border-radius: 4px; font-size: 0.9rem; }
+.chat-input-row input[type="text"]:focus { outline: none; border-color: var(--accent); }
+.chat-input-row input[type="text"]:disabled { opacity: 0.55; cursor: not-allowed; }
+.chat-input-row button { flex-shrink: 0; }
+.chat-note { margin-top: 8px; }
+.chat-note:empty { display: none; }
+
 /* ---- Storage: volumes table + share/mount controls ---- */
 /* The volumes table reuses .summary-table so it sits flush with the rest of
    the admin UI. */
@@ -341,4 +370,9 @@ button.btn { padding: 9px 20px; border: none; border-radius: 6px; font-size: 0.9
   .mount-row > span:nth-child(3) { grid-column: 2 / -1; }
   .net-grid { grid-template-columns: 1fr; }
   .net-row-live .net-control { max-width: none; }
+  /* Chat test: stack the controls and put Send under the message box. */
+  .chat-card .chat-controls { flex-direction: column; align-items: stretch; }
+  .chat-ctl { min-width: 0; }
+  .chat-input-row { flex-direction: column; }
+  .chat-input-row button { width: 100%; }
 }

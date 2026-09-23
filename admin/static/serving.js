@@ -8,8 +8,9 @@
  *       cluster (GPUs total / busy / idle, aggregate memory) plus a compact
  *       per-GPU bar grid grouped by node. Polled ~3s from
  *       GET /api/cluster/nodes.
- *   (B) MODELS — the model library from GET /api/models with a Delete action
- *       (POST /api/models/delete), plus a Hugging Face download form
+ *   (B) MODELS — the model library from GET /api/models as a dropdown with a
+ *       Delete action on the selected model (POST /api/models/delete), plus a
+ *       Hugging Face download form
  *       (POST /api/download, progress from GET /api/download/status). Carried
  *       over from index.html, same endpoints and field names.
  *   (C) LAUNCH A INSTANCE — pick a model, then tick GPUs ANYWHERE in the
@@ -233,6 +234,7 @@
     models: [],
     modelsStatus: 'loading',         // loading | ok | unavailable | error
     modelsDetail: '',
+    modelsSig: null,                 // last rendered library signature (B)
 
     // Download (B)
     download: null,
@@ -536,9 +538,22 @@
    * (B) MODELS + DOWNLOAD
    * ===================================================================== */
 
+  /* The library is a <select> + Delete (it used to be a row-per-model table).
+   * Redrawn only when the library itself changes — otherwise the 3s poll would
+   * reset the chosen model every cycle. The picked model is carried across a
+   * rebuild when it survived, so a download landing elsewhere in the list does
+   * not move the selection out from under a pending Delete. */
+  function modelsSig() {
+    return [state.modelsStatus, state.modelsDetail, state.models.join('\u0000')].join('|');
+  }
+
   function renderModels() {
     var host = el('sv-models');
     if (!host) return;
+    var sig = modelsSig();
+    if (sig === state.modelsSig) return;
+    state.modelsSig = sig;
+
     if (state.modelsStatus === 'unavailable') {
       host.innerHTML = '<div class="muted">Model library unavailable &mdash; this admin does not expose ' +
         '<code>GET /api/models</code>.</div>';
@@ -557,15 +572,25 @@
       host.innerHTML = '<div class="banner banner-empty">No models found. Download one above.</div>';
       return;
     }
-    var rows = state.models.map(function (m) {
-      return '<tr>' +
-        '<td class="mono">' + esc(m) + '</td>' +
-        '<td class="num"><button class="btn btn-danger" data-act="delete-model" data-model="' + esc(m) + '">Delete</button></td>' +
-      '</tr>';
+
+    var prevSel = el('sv-model-list');
+    var prev = prevSel ? prevSel.value : '';
+    var opts = state.models.map(function (m) {
+      return '<option value="' + esc(m) + '"' + (m === prev ? ' selected' : '') + '>' + esc(m) + '</option>';
     }).join('');
-    host.innerHTML = '<div class="table-wrap"><table class="summary-table">' +
-      '<thead><tr><th>Model</th><th class="num">Actions</th></tr></thead>' +
-      '<tbody>' + rows + '</tbody></table></div>';
+
+    host.innerHTML = '<div class="sv-card sv-library">' +
+        '<div class="sv-library-row">' +
+          '<div class="sv-field">' +
+            '<label for="sv-model-list">Installed models</label>' +
+            '<select id="sv-model-list">' + opts + '</select>' +
+          '</div>' +
+          '<button class="btn btn-danger" data-act="delete-model">Delete</button>' +
+        '</div>' +
+        '<div class="muted sv-library-note">' + state.models.length + ' model' +
+          (state.models.length === 1 ? '' : 's') + ' in the model directory. ' +
+          'Delete removes the selected one from disk.</div>' +
+      '</div>';
   }
 
   function renderDownload() {
@@ -640,8 +665,14 @@
     loadDownload().then(renderDownload);
   }
 
+  // The Delete button acts on whatever the library <select> currently shows.
+  function selectedLibraryModel() {
+    var sel = el('sv-model-list');
+    return sel ? String(sel.value || '') : '';
+  }
+
   async function onDeleteModel(model) {
-    if (!model) return;
+    if (!model) { showToast('Select a model to delete', 'warning'); return; }
     if (!MOCK && !window.confirm('Delete "' + model + '"? This cannot be undone.')) return;
     if (MOCK) {
       state.models = state.models.filter(function (m) { return m !== model; });
@@ -1127,7 +1158,7 @@
     if (!t || !root.contains(t)) return;
     var act = t.dataset.act;
     if (act === 'download') { ev.preventDefault(); onDownload(); }
-    else if (act === 'delete-model') { ev.preventDefault(); onDeleteModel(t.dataset.model); }
+    else if (act === 'delete-model') { ev.preventDefault(); onDeleteModel(t.dataset.model || selectedLibraryModel()); }
     else if (act === 'preview') { ev.preventDefault(); onPreview(); }
     else if (act === 'launch') { ev.preventDefault(); onLaunch(); }
     else if (act === 'stop-instance') { ev.preventDefault(); onStopInstance(t.dataset.instance); }

@@ -3,7 +3,9 @@
  *
  * Renders four tabs on cluster.html, organized BY ROLE:
  *   (A) SUMMARY (default)  — cluster totals from GET /api/cluster/summary plus
- *       a compact one-row-per-node table. Every node appears once.
+ *       a compact one-row-per-node table. Every node appears once. Below that,
+ *       a CHAT TEST (POST /api/chat) against any running instance, ported from
+ *       the single-node UI at /legacy.
  *   (B) WORKERS            — nodes whose roles include `participant`: one card
  *       per node with full per-GPU util/mem/temp/power telemetry, instances,
  *       AVAILABLE SHARES (every cluster share with a Mount checkbox for THAT
@@ -92,6 +94,12 @@
  *
  *   POST /api/cluster/mount  body: { node_id, share_id, enabled, mount_path? }
  *       -> { ok: true } | { ok: false, error: "..." }
+ *
+ *   POST /api/chat  body: { instance_id, messages, temperature, max_tokens }
+ *       -> { choices: [ { message: { role, content, tool_calls? } } ] }
+ *          | { error: "..." }
+ *       Same contract as the single-node UI (index.html). A 404 disables the
+ *       Summary chat tester rather than erroring.
  *
  * Every request carries the admin key in an `X-API-Key` header (see apiFetch).
  * A 401 redirects to /login, matching the existing admin UI.
@@ -446,6 +454,8 @@ function renderLive(summary, nodes) {
   const workersRoleEl = $('workers-role-label');
   if (workersRoleEl) workersRoleEl.textContent = roleLabel('participant') + ' nodes';
   renderSummary(summary, nodes);
+  // Chat lives outside #summary-content; only its target list is refreshed.
+  updateChatInstances(summary, nodes);
   renderWorkers(nodes);
   renderStorage(nodes);
 }
@@ -624,6 +634,9 @@ function renderLiveOffline(detail) {
   ['summary-content', 'workers-content', 'storage-content'].forEach(id => {
     const el = $(id); if (el) el.innerHTML = html;
   });
+  // No control plane means no instance to chat with — but the transcript
+  // already on screen is left alone.
+  updateChatInstances(null, []);
 }
 
 function offlineBanner(detail) {
@@ -701,6 +714,244 @@ function renderSummary(summary, nodes) {
   }
 
   el.innerHTML = tiles + table;
+}
+
+/* =========================================================================
+ * (A2) SUMMARY: CHAT TEST
+ *
+ * Ported from the single-node UI (index.html, still served at /legacy) so a
+ * running instance can be smoke-tested without leaving the cluster page. The
+ * wire contract is that page's, unchanged:
+ *
+ *   POST /api/chat  { instance_id, messages, temperature, max_tokens }
+ *     -> OpenAI-shaped { choices: [ { message: { role, content, tool_calls? } } ] }
+ *
+ * Non-streaming: one request, one reply appended to the transcript. A non-2xx
+ * body's `error` is toasted; a 404 means this control plane has no /api/chat,
+ * which disables the form with a muted note instead of throwing.
+ *
+ * The legacy page also exposes a tool-definitions textarea and a tool-result
+ * form; those are left on /legacy — this is the compact tester, so only the
+ * params the old UI puts on screen by default (temperature, max tokens) come
+ * across. tool_calls arriving in a reply are still *rendered*, never dropped.
+ *
+ * The markup lives in cluster.html OUTSIDE #summary-content, so the 3s poll —
+ * which rewrites that container wholesale — cannot clobber the transcript or a
+ * half-typed message. The only thing the poll touches here is the instance
+ * <select>, and it skips that while the select has focus (same focus guard as
+ * panelBusy()).
+ * ======================================================================= */
+
+// Instance states that mean "you can send a request at this". SERVING first:
+// the order is also the preference order in the dropdown.
+const CHAT_RUNNING_STATES = ['SERVING', 'RUNNING', 'HEALTHY', 'READY', 'ACTIVE'];
+
+let chatMessages = [];
+let chatInstances = [];
+let chatSending = false;
+let chatUnavailable = false;        // POST /api/chat answered 404
+
+/* Running instances, gathered from every node's instances[] and (when the
+ * control plane sends details rather than per-state counts) from
+ * summary.instances. Deduped on id+port, filtered to running states. */
+function collectChatInstances(summary, nodes) {
+  const out = [];
+  const seen = new Set();
+  const add = (r, nodeId) => {
+    if (!r || !r.id) return;
+    const key = r.id + '@' + (r.port == null ? '' : r.port);
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({
+      id: String(r.id),
+      state: String(r.state || '').toUpperCase(),
+      port: r.port,
+      model: r.model || '',
+      node_id: nodeId || r.node_id || '',
+    });
+  };
+  (nodes || []).forEach(n => (n.instances || []).forEach(r => add(r, n.node_id)));
+  // summary.instances is a map. Some backends key it by state and store a
+  // COUNT (see MOCK_SUMMARY) — those entries name no instance, so only
+  // object-shaped values are usable as a target.
+  const si = summary && summary.instances;
+  if (si && typeof si === 'object' && !Array.isArray(si)) {
+    Object.keys(si).forEach(k => {
+      const v = si[k];
+      if (v && typeof v === 'object') add({ id: v.id || k, state: v.state, port: v.port, model: v.model, node_id: v.node_id }, '');
+    });
+  }
+  const rank = s => { const i = CHAT_RUNNING_STATES.indexOf(s); return i < 0 ? 99 : i; };
+  return out
+    .filter(r => CHAT_RUNNING_STATES.indexOf(r.state) !== -1)
+    .sort((a, b) => rank(a.state) - rank(b.state) || a.id.localeCompare(b.id));
+}
+
+function chatTargetLabel(r) {
+  const model = r.model ? String(r.model).split('/').pop() : '';
+  return r.id +
+    (model ? ' — ' + model : '') +
+    ' · port ' + (r.port == null ? '?' : r.port) +
+    (r.state && r.state !== 'SERVING' ? ' · ' + r.state : '');
+}
+
+function updateChatInstances(summary, nodes) {
+  chatInstances = collectChatInstances(summary, nodes);
+  renderChatTargets();
+}
+
+function renderChatTargets() {
+  const sel = $('chat-instance');
+  if (!sel) return;
+  // Focus guard: never rebuild the dropdown the user is choosing from.
+  if (document.activeElement !== sel) {
+    const prev = sel.value;
+    if (!chatInstances.length) {
+      sel.innerHTML = '<option value="">No running instances</option>';
+    } else {
+      sel.innerHTML = chatInstances.map(r =>
+        `<option value="${escapeHtml(r.id)}">${escapeHtml(chatTargetLabel(r))}</option>`).join('');
+      if (chatInstances.some(r => r.id === prev)) sel.value = prev;
+    }
+  }
+  syncChatEnabled();
+}
+
+function syncChatEnabled() {
+  const sel = $('chat-instance');
+  const input = $('chat-input');
+  const send = $('chat-send');
+  if (!sel || !input || !send) return;
+  const usable = !chatUnavailable && chatInstances.length > 0;
+  sel.disabled = !usable;
+  input.disabled = !usable;
+  send.disabled = !usable || chatSending;
+  ['chat-temp', 'chat-max-tokens'].forEach(id => { const e = $(id); if (e) e.disabled = !usable; });
+  const note = $('chat-note');
+  if (note) {
+    note.textContent = chatUnavailable
+      ? 'Chat unavailable — this control plane does not expose POST /api/chat.'
+      : (chatInstances.length ? '' : 'No running instance to test.');
+  }
+}
+
+function renderChatTranscript() {
+  const el = $('chat-messages');
+  if (!el) return;
+  if (!chatMessages.length) {
+    el.innerHTML = '<div class="chat-placeholder">Send a message to start chatting.</div>';
+    return;
+  }
+  el.innerHTML = chatMessages.map(m => {
+    const content = m.content ? escapeHtml(m.content) : '';
+    let toolCallsHtml = '';
+    if (m.tool_calls && m.tool_calls.length) {
+      toolCallsHtml = m.tool_calls.map(tc => {
+        const fn = (tc && tc.function) || {};
+        const args = typeof fn.arguments === 'string' ? fn.arguments : JSON.stringify(fn.arguments, null, 2);
+        return `<div class="chat-tool-call">Tool call: <b>${escapeHtml(fn.name || '')}</b>\n${escapeHtml(args)}</div>`;
+      }).join('');
+    }
+    const role = String(m.role || '');
+    const label = role === 'tool' ? 'tool (' + (m.name || '') + ')' : role;
+    return `<div class="chat-msg"><div class="chat-role chat-role-${escapeHtml(role)}">${escapeHtml(label)}</div>${content}${toolCallsHtml}</div>`;
+  }).join('');
+  el.scrollTop = el.scrollHeight;
+}
+
+function chatClear() {
+  chatMessages = [];
+  renderChatTranscript();
+}
+
+function chatSend() {
+  const input = $('chat-input');
+  if (!input) return;
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  chatMessages.push({ role: 'user', content: text });
+  renderChatTranscript();
+  chatComplete();
+}
+
+async function chatComplete() {
+  const sel = $('chat-instance');
+  const instanceId = sel ? sel.value : '';
+  if (!instanceId) { showToast('Select a running instance', 'warning'); return; }
+
+  // Exactly the legacy body: instance_id + the running transcript + params.
+  const body = {
+    instance_id: instanceId,
+    messages: chatMessages,
+    temperature: parseFloat(($('chat-temp') || {}).value) || 0.7,
+    max_tokens: parseInt(($('chat-max-tokens') || {}).value, 10) || 1024,
+  };
+
+  chatSending = true;
+  syncChatEnabled();
+  const msgEl = $('chat-messages');
+  if (msgEl) {
+    msgEl.insertAdjacentHTML('beforeend', '<div class="chat-pending" id="chat-loading">Waiting for response…</div>');
+    msgEl.scrollTop = msgEl.scrollHeight;
+  }
+  const clearPending = () => { const ld = $('chat-loading'); if (ld) ld.remove(); };
+
+  try {
+    if (MOCK) {
+      await new Promise(r => setTimeout(r, 400));
+      clearPending();
+      chatMessages.push({
+        role: 'assistant',
+        content: 'Mock mode: no model is actually running. ' + instanceId +
+          ' would have answered here (temperature ' + body.temperature +
+          ', max_tokens ' + body.max_tokens + ').',
+      });
+      renderChatTranscript();
+      return;
+    }
+
+    const res = await apiFetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (res.status === 404) {
+      clearPending();
+      chatUnavailable = true;
+      syncChatEnabled();
+      return;
+    }
+    let data = {};
+    try { data = await res.json(); } catch (e) { data = {}; }
+    clearPending();
+
+    if (!res.ok) { showToast(data.error || JSON.stringify(data) || ('HTTP ' + res.status), 'error'); return; }
+
+    const choice = data.choices && data.choices[0];
+    if (!choice || !choice.message) { showToast('No response from model', 'error'); return; }
+
+    chatMessages.push(choice.message);
+    renderChatTranscript();
+  } catch (e) {
+    clearPending();
+    showToast('Chat request failed: ' + (e.message || e), 'error');
+  } finally {
+    chatSending = false;
+    syncChatEnabled();
+  }
+}
+
+function initChat() {
+  const send = $('chat-send');
+  const clear = $('chat-clear');
+  const input = $('chat-input');
+  if (!send || !input) return;
+  send.addEventListener('click', ev => { ev.preventDefault(); chatSend(); });
+  input.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); chatSend(); } });
+  if (clear) clear.addEventListener('click', ev => { ev.preventDefault(); chatClear(); });
+  renderChatTranscript();
+  syncChatEnabled();
 }
 
 /* ---- (B) WORKERS (participant role) ---- */
@@ -1848,6 +2099,7 @@ function initKeybar() {
 
 function init() {
   initKeybar();
+  initChat();
   document.querySelectorAll('.tab-btn').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
   if (MOCK) {
     const badge = $('mock-badge');

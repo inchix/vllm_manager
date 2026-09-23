@@ -90,6 +90,12 @@
   background: var(--accent, #6c8cff); transition: width 0.4s ease;
 }
 
+/* ---- (B) model library: a select + Delete (was a row-per-model table) -- */
+.sv-library-row { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
+.sv-library-row .sv-field { flex: 1 1 240px; }
+.sv-library-row .btn { flex: 0 0 auto; }
+.sv-library-note { margin-top: 10px; }
+
 /* ---- (C) launch form -------------------------------------------------- */
 .sv-form {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px 14px;
@@ -192,6 +198,9 @@
   .sv-plan-nodes { grid-template-columns: 1fr; }
   .sv-dl-label { flex: 1 1 100%; }
   .sv-dl #sv-dl-repo, .sv-dl #sv-dl-rev { flex: 1 1 100%; }
+  /* Model library: select on its own line, Delete full width beneath it. */
+  .sv-library-row .sv-field { flex: 1 1 100%; }
+  .sv-library-row .btn { flex: 1 1 100%; }
   .sv-actions .btn { flex: 1 1 auto; }
   .sv-layout-row { gap: 8px; }
   .sv-kpi-val { font-size: 1.25rem; }
