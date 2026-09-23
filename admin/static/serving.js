@@ -362,6 +362,15 @@
               '<label for="sv-extra-args">Extra vLLM args <span class="muted">(optional)</span></label>' +
               '<input id="sv-extra-args" type="text" spellcheck="false" placeholder="--swap-space 4 --tool-call-parser hermes">' +
             '</div>' +
+            '<div class="sv-field sv-field-wide sv-check-field">' +
+              '<label class="sv-check">' +
+                '<input id="sv-lang-only" type="checkbox">' +
+                '<span>Language model only <span class="muted">(skip the vision tower)</span></span>' +
+              '</label>' +
+              '<div class="muted sv-hint">Tick for a multimodal model on older GPUs: the vision ' +
+              'encoder\'s Triton attention kernel hangs on Volta (V100), so the instance never ' +
+              'finishes starting. Text-only inference is unaffected.</div>' +
+            '</div>' +
           '</div>' +
 
           '<div class="sv-sub-title">GPUs — tick the ones this instance should use</div>' +
@@ -1007,6 +1016,9 @@
     if (maxLen > 0) body.max_model_len = maxLen;
     var extra = splitArgs(val('sv-extra-args'));
     if (extra.length) body.extra_args = extra;
+    // Serve a multimodal model text-only; its ViT Triton attention hangs on Volta.
+    var langOnly = document.getElementById('sv-lang-only');
+    if (langOnly && langOnly.checked) body.language_model_only = true;
     var util = parseFloat(val('sv-gpu-util'));
     // Forward-compatible: today the scheduler reads gpu_memory_utilization from
     // each node's effective config and ignores this key.

@@ -337,3 +337,9 @@ body.light-theme .sv-root {
   .sv-log-tag { width: 54px; }
   .sv-log-lines { font-size: 0.7rem; }
 }
+
+/* Launch form: checkbox-style field (e.g. "Language model only") */
+.sv-root .sv-check-field { display: flex; flex-direction: column; gap: 4px; }
+.sv-root .sv-check { display: flex; align-items: center; gap: 8px; cursor: pointer; font-weight: 500; }
+.sv-root .sv-check input[type="checkbox"] { width: 16px; height: 16px; margin: 0; cursor: pointer; }
+.sv-root .sv-hint { font-size: 0.78rem; line-height: 1.35; }
