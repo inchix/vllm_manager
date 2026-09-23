@@ -196,6 +196,7 @@ if CONTROL_PLANE:
             config_path=str(MODELS_DIR / ".vllm-manager" / "cluster-config.json"),
             api_key=auth.ADMIN_API_KEY,
             auth_enabled=auth.AUTH_ENABLED,
+            cookie_name=auth.COOKIE_NAME,   # so browser sessions authenticate the cluster API
         )
         app.include_router(build_cluster_router(cluster_hub))
 

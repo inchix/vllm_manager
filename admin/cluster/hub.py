@@ -18,7 +18,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Header, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from . import protocol, scheduler
@@ -30,7 +30,11 @@ log = logging.getLogger("admin.cluster.hub")
 
 class ClusterHub:
     def __init__(self, config_path: str, api_key: str = "", auth_enabled: bool = True,
-                 agent_version: str = "0.4.0"):
+                 agent_version: str = "0.4.0", cookie_name: str = "vllm_admin_session"):
+        # Browser sessions authenticate with this cookie (set by /api/auth/login), the
+        # same credential the app's auth middleware accepts. The router must honour it
+        # or every UI data call 401s even though the page itself loaded.
+        self.cookie_name = cookie_name
         self.registry = Registry()
         self.config = ClusterConfigStore(config_path)
         self.api_key = api_key
@@ -52,7 +56,21 @@ class ClusterHub:
         auth = ws.headers.get("authorization", "")
         if auth.lower().startswith("bearer "):
             return auth[7:].strip()
-        return ws.headers.get("x-api-key") or ws.query_params.get("key")
+        return (ws.headers.get("x-api-key")
+                or ws.query_params.get("key")
+                or ws.cookies.get(self.cookie_name))
+
+    def key_from_request(self, request: Request) -> Optional[str]:
+        """Credentials accepted for the cluster REST API, in the same order the app's
+        auth middleware uses: X-API-Key header, Bearer token, then session cookie."""
+        key = request.headers.get("x-api-key")
+        if not key:
+            auth = request.headers.get("authorization", "")
+            if auth.lower().startswith("bearer "):
+                key = auth[7:].strip()
+        if not key:
+            key = request.cookies.get(self.cookie_name)
+        return key.strip() if key else None
 
     # -- lifecycle --------------------------------------------------------
     def start(self) -> None:
@@ -320,42 +338,37 @@ class ClusterHub:
 def build_cluster_router(hub: ClusterHub) -> APIRouter:
     router = APIRouter()
 
-    def _auth(x_api_key: Optional[str], authorization: Optional[str]) -> bool:
-        key = x_api_key
-        if not key and authorization and authorization.lower().startswith("bearer "):
-            key = authorization[7:].strip()
-        return hub.check_key(key)
+    def _auth(request: Request) -> bool:
+        return hub.check_key(hub.key_from_request(request))
+
+    _UNAUTH = JSONResponse(status_code=401, content={"error": "unauthorized"})
 
     @router.websocket("/api/ccp")
     async def ccp(ws: WebSocket):
         await hub.handle_ws(ws)
 
     @router.get("/api/cluster/nodes")
-    async def nodes(x_api_key: Optional[str] = Header(None),
-                    authorization: Optional[str] = Header(None)):
-        if not _auth(x_api_key, authorization):
-            return JSONResponse(status_code=401, content={"error": "unauthorized"})
+    async def nodes(request: Request):
+        if not _auth(request):
+            return _UNAUTH
         return hub.registry.public()
 
     @router.get("/api/cluster/summary")
-    async def summary(x_api_key: Optional[str] = Header(None),
-                      authorization: Optional[str] = Header(None)):
-        if not _auth(x_api_key, authorization):
-            return JSONResponse(status_code=401, content={"error": "unauthorized"})
+    async def summary(request: Request):
+        if not _auth(request):
+            return _UNAUTH
         return hub.summary()
 
     @router.get("/api/cluster/config")
-    async def get_config(x_api_key: Optional[str] = Header(None),
-                         authorization: Optional[str] = Header(None)):
-        if not _auth(x_api_key, authorization):
-            return JSONResponse(status_code=401, content={"error": "unauthorized"})
+    async def get_config(request: Request):
+        if not _auth(request):
+            return _UNAUTH
         return hub.config.snapshot(hub.registry.detected_by_node())
 
     @router.post("/api/cluster/config")
-    async def set_config(request: Request, x_api_key: Optional[str] = Header(None),
-                         authorization: Optional[str] = Header(None)):
-        if not _auth(x_api_key, authorization):
-            return JSONResponse(status_code=401, content={"error": "unauthorized"})
+    async def set_config(request: Request):
+        if not _auth(request):
+            return _UNAUTH
         data = await request.json()
         errors = []
         if "defaults" in data:
@@ -370,10 +383,9 @@ def build_cluster_router(hub: ClusterHub) -> APIRouter:
         return hub.config.snapshot(hub.registry.detected_by_node())
 
     @router.post("/api/cluster/plan")
-    async def plan(request: Request, x_api_key: Optional[str] = Header(None),
-                   authorization: Optional[str] = Header(None)):
-        if not _auth(x_api_key, authorization):
-            return JSONResponse(status_code=401, content={"error": "unauthorized"})
+    async def plan(request: Request):
+        if not _auth(request):
+            return _UNAUTH
         d = await request.json()
         res = hub.plan(
             d["model"], d["node_ids"], port=int(d.get("port", 8001)),
@@ -382,10 +394,9 @@ def build_cluster_router(hub: ClusterHub) -> APIRouter:
         return JSONResponse(status_code=200 if res.get("ok") else 400, content=res)
 
     @router.post("/api/cluster/launch")
-    async def launch(request: Request, x_api_key: Optional[str] = Header(None),
-                     authorization: Optional[str] = Header(None)):
-        if not _auth(x_api_key, authorization):
-            return JSONResponse(status_code=401, content={"error": "unauthorized"})
+    async def launch(request: Request):
+        if not _auth(request):
+            return _UNAUTH
         d = await request.json()
         res = await hub.launch(
             d["model"], d["node_ids"], port=int(d["port"]),
@@ -394,10 +405,9 @@ def build_cluster_router(hub: ClusterHub) -> APIRouter:
         return JSONResponse(status_code=200 if res.get("ok") else 400, content=res)
 
     @router.post("/api/cluster/stop")
-    async def stop(request: Request, x_api_key: Optional[str] = Header(None),
-                   authorization: Optional[str] = Header(None)):
-        if not _auth(x_api_key, authorization):
-            return JSONResponse(status_code=401, content={"error": "unauthorized"})
+    async def stop(request: Request):
+        if not _auth(request):
+            return _UNAUTH
         d = await request.json()
         return await hub.stop_replica(d["replica_id"], ray=d.get("ray", True))
 
