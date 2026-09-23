@@ -27,6 +27,7 @@ SSH/manual orchestration with a small command-and-control protocol and composabl
 | [05 — Migration & compatibility](05-migration.md) | Relationship to v0.3.0 `CLUSTER_MODE` and to community PR #1; upgrade path; config |
 | [06 — Roadmap](06-roadmap.md) | Phased implementation plan with hardware gates |
 | [07 — Configuration](07-configuration.md) | Layered config model, **per-node overrides**, full settings catalog, the all-settings UI |
+| [08 — Image distribution](08-image-distribution.md) | Build the image **once**, push to GHCR, pin by digest so every node runs byte-identical bytes; `IMAGE_REF`, cutting a version, air-gapped fallback |
 
 ## One-paragraph summary
 

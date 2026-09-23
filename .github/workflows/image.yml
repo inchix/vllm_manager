@@ -1,0 +1,157 @@
+# Build the cluster image once, push it to GHCR, pin it by digest.
+#
+# WHY this exists at all:
+#   Every node in a multi-node cluster must run a BYTE-IDENTICAL image. Ray, NCCL
+#   and vLLM all refuse to work — or worse, work badly and hang mid-forward — when
+#   two boxes disagree on their versions. The Containerfile already pins the vLLM
+#   base by digest and every pip package to an exact version, but that only makes
+#   a build reproducible *in principle*: two boxes building "the same" Containerfile
+#   days apart can still pick up a different wheel build or a rebuilt Go toolchain.
+#   The only real guarantee is that all nodes pull the SAME artifact. So: build once
+#   here, push to ghcr.io, and have nodes pull it by @sha256 digest.
+#
+# The repo is public, so the resulting package is public too — nodes need no
+# registry credentials to pull.
+#
+# See docs/08-image-distribution.md for the operator-facing flow.
+
+name: image
+
+on:
+  push:
+    branches:
+      - main
+      - 'v*'          # milestone branches (v0.3.0, v0.4.0, …) follow the repo convention
+    tags:
+      - 'v*'
+  workflow_dispatch:   # cut an image by hand from any ref
+
+permissions:
+  contents: read       # only needs to check out the source
+  packages: write      # …and write the package to ghcr.io
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/inchix/vllm_manager
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    # The vLLM base is ~10-16 GB; a cold build (pull base + 5 pip installs + Go
+    # stage + push) is slow. Give it room rather than failing at the 360 min cap.
+    timeout-minutes: 300
+
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------------
+      # DISK SPACE — the whole reason this job can fail.
+      #
+      # A GitHub-hosted ubuntu-latest runner ships ~14 GB free on /. The vLLM
+      # base image alone is ~10-16 GB, and the build needs room for the base,
+      # the extracted layers, the pip installs and the layer tarballs being
+      # pushed — comfortably more than the runner starts with.
+      #
+      # These directories are preinstalled toolchains this build never touches,
+      # and removing them frees ~25-30 GB. It is a real fix, not a hope.
+      #
+      # IF THIS JOB STILL RUNS OUT OF DISK: do NOT paper over it (a truncated
+      # push produces an image that pulls fine on one node and not on another —
+      # exactly the skew this whole pipeline exists to prevent). The fallback is
+      # a SELF-HOSTED runner on the cluster's admin box, which has the disk and
+      # already builds this image daily:
+      #     1. Settings → Actions → Runners → New self-hosted runner
+      #     2. change `runs-on: ubuntu-latest` to `runs-on: [self-hosted, linux, x64]`
+      #     3. drop the "Free up disk space" step below (it would nuke the host's
+      #        real toolchains)
+      # The stop-gap in the meantime is scripts/push-image.sh, which pushes an
+      # image already built on the admin box.
+      # ---------------------------------------------------------------------
+      - name: Free up disk space
+        run: |
+          set -euxo pipefail
+          echo "--- before ---"; df -h /
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          docker image prune -af
+          echo "--- after ---"; df -h /
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          # The built-in token. `packages: write` above is what makes it
+          # sufficient — no PAT to mint, rotate, or leak.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tags produced:
+      #   latest        — default branch only, so `:latest` never silently points
+      #                   at a work-in-progress milestone branch
+      #   <branch>      — e.g. v0.4.0, for the branch currently under test
+      #   <short sha>   — the immutable-ish one you quote when asking "which build?"
+      #   <git tag>     — e.g. v0.4.0 when a tag is pushed
+      # None of these is a substitute for the digest: tags move, digests do not.
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,format=short,prefix=
+          labels: |
+            org.opencontainers.image.title=vllm-manager
+            org.opencontainers.image.description=vLLM Manager admin/agent image (multi-node cluster)
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Containerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64
+          # Push a plain single-arch manifest. With provenance/SBOM attestations
+          # on, the pushed digest names an index whose entries include the
+          # attestation — harmless for docker, but it makes `podman pull <digest>`
+          # and the digest we print below less obviously "the image". Nodes pull
+          # by digest, so keep the digest meaning exactly one image.
+          provenance: false
+          sbom: false
+          # No registry/GHA cache on purpose: the GHA cache cap is 10 GB and this
+          # image is larger than that, so caching evicts itself and just adds a
+          # slow upload to every run.
+
+      # The digest IS the contract. `IMAGE_REF=ghcr.io/inchix/vllm_manager@sha256:…`
+      # in the admin's .env is what guarantees every joining node pulls the same
+      # bytes; a tag could be overwritten by the next push and re-skew the cluster.
+      - name: Report the pushed image
+        run: |
+          set -euo pipefail
+          REF="${IMAGE}@${DIGEST}"
+          {
+            printf '## Image pushed\n\n'
+            printf '**Pin nodes to this digest ref.** Set it as `IMAGE_REF` in the admin '
+            printf 'node'"'"'s `.env` — that is what `/api/cluster/image` advertises and what '
+            printf '`join.sh` pulls on every joining node:\n\n'
+            printf '```\nIMAGE_REF=%s\n```\n\n' "$REF"
+            printf 'Tags pushed, all pointing at that same digest:\n\n'
+            printf '```\n%s\n```\n\n' "$TAGS"
+            printf 'Verify on a node: `podman pull %s`\n' "$REF"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "pushed: ${REF}"
+        env:
+          IMAGE: ${{ env.IMAGE }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
