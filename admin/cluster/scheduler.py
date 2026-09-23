@@ -173,6 +173,25 @@ def build_instance_plan(
             args.append("--disable-custom-all-reduce")
         return args
 
+    # NCCL_SOCKET_IFNAME must be a COMMA LIST valid on EVERY node, with this node's
+    # NIC first. Ray copies the DRIVER's environment to all workers, so a single
+    # name like "enp196s0" (covid) is pushed to ebola where only "ens2" exists and
+    # NCCL fails with "invalid usage". NCCL matches whichever entry exists locally.
+    # Gloo cannot parse a list, so GLOO_SOCKET_IFNAME stays this node's single NIC.
+    all_nics = []
+    for n in ordered:
+        nic = (effective_by_node.get(n.node_id, {}) or {}).get("nccl_socket_ifname") or ""
+        for part in str(nic).split(","):
+            part = part.strip()
+            if part and part not in all_nics:
+                all_nics.append(part)
+
+    def nccl_ifname_for(node) -> str:
+        local = (effective_by_node.get(node.node_id, {}) or {}).get("nccl_socket_ifname") or ""
+        local = str(local).split(",")[0].strip()
+        ordered_nics = ([local] if local else []) + [n for n in all_nics if n != local]
+        return ",".join(ordered_nics)
+
     commands = []
     for i, node in enumerate(ordered):
         body = {
@@ -192,7 +211,8 @@ def build_instance_plan(
             "gpu_memory_utilization": head_cfg.get("gpu_memory_utilization", 0.85),
             "dtype": head_cfg.get("dtype", "auto"),
             "vllm_args": vllm_args_for(),
-            "env": _instance_env(effective_by_node.get(node.node_id, {})),
+            "env": _instance_env(effective_by_node.get(node.node_id, {}),
+                                 nccl_ifname=nccl_ifname_for(node)),
         }
         commands.append((node.node_id, body))
 
@@ -206,7 +226,7 @@ def build_instance_plan(
     }
 
 
-def _instance_env(cfg: dict) -> dict:
+def _instance_env(cfg: dict, nccl_ifname: Optional[str] = None) -> dict:
     """Per-node NCCL/fabric env for the instance, from that node's effective config."""
     env = {}
     mapping = {
@@ -220,6 +240,8 @@ def _instance_env(cfg: dict) -> dict:
         val = cfg.get(key)
         if val not in (None, ""):
             env[envname] = str(val)
+    if nccl_ifname:
+        env["NCCL_SOCKET_IFNAME"] = nccl_ifname   # cluster-wide list, local-first
     if cfg.get("nccl_p2p_disable"):
         env["NCCL_P2P_DISABLE"] = "1"
     if cfg.get("nccl_ib_disable"):

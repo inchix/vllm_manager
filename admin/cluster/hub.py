@@ -453,7 +453,7 @@ class ClusterHub:
                     "node_ip": (self.config.effective(nid, node.detected).get("ray_node_ip")
                                 or (node.addresses or {}).get("mgmt", "")) if node else "",
                     # this node's NCCL/fabric env, so Ray actors inherit it
-                    "env": scheduler._replica_env(eff_by.get(nid, {})) if node else {},
+                    "env": scheduler._instance_env(eff_by.get(nid, {})) if node else {},
                 }), timeout=150)
                 results["ray:" + nid] = res
                 if not res.get("ok"):
