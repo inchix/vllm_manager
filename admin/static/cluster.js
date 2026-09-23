@@ -158,6 +158,12 @@ function escapeHtml(s) {
   return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// "/" is the main UI now, so it needs its own sign-out (matches index.html).
+async function logout() {
+  try { await fetch('/api/auth/logout', { method: 'POST' }); } catch (e) {}
+  window.location.href = '/login';
+}
+
 function toggleTheme() {
   document.body.classList.toggle('light-theme');
   const isLight = document.body.classList.contains('light-theme');
