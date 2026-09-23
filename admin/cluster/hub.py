@@ -311,6 +311,25 @@ class ClusterHub:
             }))
 
     # -- launch / stop (Phase 2 scaffold) --------------------------------
+    def _resolve_model(self, model: str, nodes: list) -> str:
+        """Turn a bare model NAME into a path under the canonical model dir.
+
+        /api/models returns names ("Devstral-Small-2507"), but vLLM's --model wants a
+        filesystem path or a HF repo id. v0.3.0 resolved this in /api/start; the cluster
+        path must do the same or the launch dies with "not a local folder".
+        Anything already absolute, or that looks like a HF repo id (org/name), is left
+        alone.
+        """
+        if not model or model.startswith("/") or "/" in model.strip("/"):
+            return model
+        base = ""
+        for n in nodes:
+            base = n.canonical_model_path or base
+            if base:
+                break
+        base = base or self.config.defaults().get("canonical_model_path") or "/models"
+        return base.rstrip("/") + "/" + model
+
     def plan(self, model: str, node_ids: list, *, port: int,
              num_layers: Optional[int] = None, **kw) -> dict:
         """Compute the instance plan WITHOUT executing it (dry run for the UI)."""
@@ -319,6 +338,7 @@ class ClusterHub:
         if not nodes:
             return {"ok": False, "error": "no such participant nodes"}
         eff_by = {n.node_id: self.config.effective(n.node_id, n.detected) for n in nodes}
+        model = self._resolve_model(model, nodes)
         try:
             plan = scheduler.build_instance_plan(
                 kw.pop("instance_id", "plan-preview"), nodes, model, eff_by,
@@ -337,7 +357,10 @@ class ClusterHub:
             return {"ok": True, "detail": "no storage role; assuming models are local"}
         snode = storage[0]
         seff = self.config.effective(snode.node_id, snode.detected)
-        canonical = seff.get("canonical_model_path", "/export/llm_models")
+        # The agent knows its own in-container path (reported at register); trust that
+        # over any configured default, which may be a host path the agent cannot see.
+        canonical = (snode.canonical_model_path
+                     or seff.get("canonical_model_path", "/models"))
         export_dir = seff.get("storage_export_dir") or canonical
         fabric = (snode.addresses.get("fabric") or [snode.addresses.get("mgmt", "")])
         fabric_ip = fabric[0] if fabric else ""
@@ -357,7 +380,8 @@ class ClusterHub:
             results[p.node_id] = await self.send_command(
                 p.node_id, protocol.make_frame(protocol.MOUNT_STORAGE, {
                     "source": {"host": fabric_ip, "export": export_dir, "transport": transport},
-                    "canonical_path": peff.get("canonical_model_path", canonical),
+                    "canonical_path": (p.canonical_model_path
+                                       or peff.get("canonical_model_path", canonical)),
                     "opts": peff.get("mount_opts")}), timeout=45)
         ok = all(r.get("ok") for r in results.values())
         return {"ok": ok, "storage_host": snode.node_id, "transport": transport,
@@ -375,6 +399,7 @@ class ClusterHub:
                 return {"ok": False, "error": "storage coordination failed",
                         "storage": storage_res}
         eff_by = {n.node_id: self.config.effective(n.node_id, n.detected) for n in nodes}
+        model = self._resolve_model(model, nodes)
         instance_id = kw.pop("instance_id", None) or f"instance-{len(self._instances) + 1}"
         try:
             plan = scheduler.build_instance_plan(
@@ -407,6 +432,27 @@ class ClusterHub:
             results[nid] = await self.send_command(nid, frame, timeout=60)
         meta["state"] = "STOPPED"
         return {"ok": True, "instance_id": instance_id, "results": results}
+
+    # -- logs -------------------------------------------------------------
+    async def instance_logs(self, instance_id: str, tail: int = 200,
+                            node_id: Optional[str] = None) -> dict:
+        """Fetch an instance's logs from every node running it, merged and
+        node-tagged — the cluster equivalent of tailing one process. Without this
+        a failed launch can only be diagnosed by shelling into a container."""
+        meta = self._instances.get(instance_id) or {}
+        targets = [node_id] if node_id else list(meta.get("node_ids") or [])
+        if not targets:   # unknown instance: ask every connected node
+            targets = list(self._conns.keys())
+        out, merged = {}, []
+        for nid in targets:
+            res = await self.send_command(nid, protocol.make_frame(
+                protocol.GET_LOGS, {"instance_id": instance_id, "tail": tail}), timeout=20)
+            out[nid] = res
+            for line in (res.get("lines") or []):
+                merged.append({"node_id": nid, "line": line})
+        return {"ok": True, "instance_id": instance_id,
+                "nodes": out, "merged": merged,
+                "state": meta.get("state"), "model": meta.get("model")}
 
     # -- role management --------------------------------------------------
     async def set_roles(self, node_id: str, roles: list) -> dict:
@@ -698,6 +744,21 @@ def build_cluster_router(hub: ClusterHub) -> APIRouter:
             return _UNAUTH
         d = await request.json()
         return hub.revoke_join_token(d.get("token"), d.get("node_id"))
+
+    @router.get("/api/cluster/logs")
+    async def logs(request: Request):
+        if not _auth(request):
+            return _UNAUTH
+        q = request.query_params
+        iid = q.get("instance") or q.get("instance_id") or ""
+        if not iid:
+            return JSONResponse(status_code=400,
+                                content={"ok": False, "error": "instance= is required"})
+        try:
+            tail = int(q.get("tail", 200))
+        except ValueError:
+            tail = 200
+        return await hub.instance_logs(iid, tail, q.get("node"))
 
     @router.post("/api/cluster/roles")
     async def roles(request: Request):

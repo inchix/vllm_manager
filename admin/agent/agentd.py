@@ -226,6 +226,8 @@ class Agent:
             return r.serve_storage(body)
         if ftype == protocol.UNSHARE_STORAGE:
             return r.unshare_storage(body)
+        if ftype == protocol.GET_LOGS:
+            return r.instance_logs(body.get("instance_id", ""), body.get("tail", 200))
         if ftype == protocol.SYNC_MODEL:
             return r.sync_model(body)
         if ftype == protocol.SET_CONFIG:

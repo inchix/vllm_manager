@@ -93,7 +93,10 @@ IMAGE_DEFAULTS: dict = {
     "port_start": 8001,
     "port_end": 8010,
     "cache_dir": "/models/.vllm-cache",
-    "canonical_model_path": "/export/llm_models",
+    # The path INSIDE the container, where run.sh mounts MODELS_DIR. Agents report
+    # their own value (CANONICAL_MODEL_PATH) at register and that wins; this is just
+    # the fallback. It must not be the host path — the agent cannot see that.
+    "canonical_model_path": "/models",
     "mount_opts": ["vers=3", "proto=tcp", "ro", "nofail", "soft", "timeo=100", "retrans=3"],
     "storage_transport": "tcp",
     "storage_readahead": "8m",

@@ -34,6 +34,36 @@ class Runner:
         self._instances: dict = {}     # instance_id -> {procs: [Popen], role, port, state}
         self._shares: dict = {}       # export path -> {proc, endpoint, port}
         self._mounts: dict = {}       # path -> {source, ok}
+        # Per-instance log files. vLLM output used to go straight to the agent's
+        # stdout, interleaved with agent chatter and unattributable — you could not
+        # answer "why did this instance fail?" without shelling into the container.
+        # Each instance now writes its own file, which get_logs tails.
+        self._log_dir = (os.environ.get("VLLM_INSTANCE_LOG_DIR")
+                         or os.path.join(os.environ.get("CANONICAL_MODEL_PATH", "/models"),
+                                         ".vllm-manager", "logs"))
+        for candidate in (self._log_dir, "/tmp/vllm-instance-logs"):
+            try:
+                os.makedirs(candidate, exist_ok=True)
+                self._log_dir = candidate
+                break
+            except OSError:
+                continue
+
+    def _log_path(self, instance_id: str) -> str:
+        safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in instance_id)
+        return os.path.join(self._log_dir, "%s.log" % safe)
+
+    def instance_logs(self, instance_id: str, tail: int = 200) -> dict:
+        """Last `tail` lines of one instance's output on THIS node."""
+        path = self._log_path(instance_id)
+        try:
+            with open(path, "r", errors="replace") as fh:
+                lines = fh.read().splitlines()
+        except FileNotFoundError:
+            return {"ok": True, "path": path, "lines": [], "detail": "no log yet"}
+        except OSError as exc:
+            return {"ok": False, "error": str(exc), "path": path, "lines": []}
+        return {"ok": True, "path": path, "lines": lines[-max(1, int(tail)):]}
 
     # -- GPU telemetry ----------------------------------------------------
     def _telemetry_via_pynvml(self):
@@ -161,9 +191,15 @@ class Runner:
             self._mounts[path] = {"source": actual or "unknown"}
             if actual == requested:
                 return {"ok": True, "detail": "already mounted"}
-            return {"ok": False,
-                    "error": "%s is already mounted from %s (wanted %s) — unmount it first"
-                             % (path, actual or "an unknown source", requested)}
+            # Something else already provides the repo here (e.g. a legacy kernel NFS
+            # fstab entry). The goal — models readable at the canonical path — is met,
+            # so don't block a launch; report the ACTUAL source rather than pretending
+            # we mounted the requested one.
+            return {"ok": True, "warning": True,
+                    "source": actual or "unknown",
+                    "detail": "%s already mounted from %s (not the requested %s); "
+                              "using the existing mount"
+                              % (path, actual or "an unknown source", requested)}
         os.makedirs(path, exist_ok=True)
         # modelfsd listens on an advertised ephemeral port, so the NFS client needs
         # both the NFS and MOUNT ports pinned to it.
@@ -355,7 +391,8 @@ class Runner:
             # single-node, mp executor: no Ray, head runs vLLM across the local GPUs.
             cmd = self._vllm_cmd(body, executor="mp")
             try:
-                procs.append(subprocess.Popen(cmd, env=env))
+                lf = open(self._log_path(rid), "ab", buffering=0)
+                procs.append(subprocess.Popen(cmd, env=env, stdout=lf, stderr=lf))
             except FileNotFoundError as exc:
                 return {"ok": False, "error": str(exc)}
         elif role == "head":
@@ -366,7 +403,8 @@ class Runner:
             env["RAY_ADDRESS"] = f"{head_addr}:{port}"
             cmd = self._vllm_cmd(body, executor="ray")
             try:
-                procs.append(subprocess.Popen(cmd, env=env))
+                lf = open(self._log_path(rid), "ab", buffering=0)
+                procs.append(subprocess.Popen(cmd, env=env, stdout=lf, stderr=lf))
             except FileNotFoundError as exc:
                 return {"ok": False, "error": str(exc)}
         else:
