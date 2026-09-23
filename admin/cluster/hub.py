@@ -202,6 +202,24 @@ class ClusterHub:
             }))
 
     # -- launch / stop (Phase 2 scaffold) --------------------------------
+    def plan(self, model: str, node_ids: list, *, port: int,
+             num_layers: Optional[int] = None, **kw) -> dict:
+        """Compute the replica plan WITHOUT executing it (dry run for the UI)."""
+        nodes = [self.registry.get(n) for n in node_ids]
+        nodes = [n for n in nodes if n is not None]
+        if not nodes:
+            return {"ok": False, "error": "no such participant nodes"}
+        eff_by = {n.node_id: self.config.effective(n.node_id, n.detected) for n in nodes}
+        try:
+            plan = scheduler.build_replica_plan(
+                kw.pop("replica_id", "plan-preview"), nodes, model, eff_by,
+                port=port, num_layers=num_layers, **kw)
+        except scheduler.ScheduleError as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "layout": plan["layout"], "port": plan["port"],
+                "pp_layer_partition": plan["pp_layer_partition"],
+                "commands": [{"node_id": nid, "body": body} for nid, body in plan["commands"]]}
+
     async def launch(self, model: str, node_ids: list, *, port: int,
                      num_layers: Optional[int] = None, **kw) -> dict:
         nodes = [self.registry.get(n) for n in node_ids]
@@ -311,6 +329,18 @@ def build_cluster_router(hub: ClusterHub) -> APIRouter:
             return JSONResponse(status_code=400, content={"error": "; ".join(errors)})
         await hub.push_config(list((data.get("nodes") or {}).keys()) or None)
         return hub.config.snapshot(hub.registry.detected_by_node())
+
+    @router.post("/api/cluster/plan")
+    async def plan(request: Request, x_api_key: Optional[str] = Header(None),
+                   authorization: Optional[str] = Header(None)):
+        if not _auth(x_api_key, authorization):
+            return JSONResponse(status_code=401, content={"error": "unauthorized"})
+        d = await request.json()
+        res = hub.plan(
+            d["model"], d["node_ids"], port=int(d.get("port", 8001)),
+            num_layers=d.get("num_layers"), served_model_name=d.get("served_model_name"),
+            max_model_len=d.get("max_model_len"), extra_args=d.get("extra_args"))
+        return JSONResponse(status_code=200 if res.get("ok") else 400, content=res)
 
     @router.post("/api/cluster/launch")
     async def launch(request: Request, x_api_key: Optional[str] = Header(None),

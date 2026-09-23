@@ -127,12 +127,21 @@ def build_replica_plan(
         pp_partition = ",".join(str(x) for x in memory_weighted_partition(weights, num_layers))
 
     ray = {"head_addr": _node_ip(head), "port": int(head_cfg.get("ray_head_port", 6379))}
+    # Executor: multi-node uses Ray; single-node multi-GPU uses mp (Ray hangs the TP forward on
+    # this V100+IOMMU hardware — the v0.3.0 lesson, docs/04).
+    executor = "ray" if layout["pp"] > 1 else head_cfg.get("multigpu_executor", "mp")
+    multi_gpu = layout["world"] > 1
 
     def vllm_args_for() -> list:
         args = list(extra_args or [])
-        if head_cfg.get("enforce_eager", True) and "--enforce-eager" not in args:
+        # --enforce-eager is REQUIRED for the cluster PP path (CUDA-graph capture crashes on
+        # V100+PP-over-RDMA); single-node graphs are fine, so only force it when pp>1.
+        if layout["pp"] > 1 and head_cfg.get("enforce_eager", True) \
+                and "--enforce-eager" not in args:
             args.append("--enforce-eager")
-        if head_cfg.get("disable_custom_all_reduce") and "--disable-custom-all-reduce" not in args:
+        # custom all-reduce uses the broken PCIe P2P on this hardware; disable for any multi-GPU.
+        if multi_gpu and head_cfg.get("disable_custom_all_reduce") \
+                and "--disable-custom-all-reduce" not in args:
             args.append("--disable-custom-all-reduce")
         return args
 
@@ -147,6 +156,7 @@ def build_replica_plan(
                 "tp": layout["tp"],
                 "pp": layout["pp"],
                 "pp_layer_partition": pp_partition,
+                "executor": executor,
             },
             "port": port if i == 0 else None,
             "served_model_name": served_model_name,

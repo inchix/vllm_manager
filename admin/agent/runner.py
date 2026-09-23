@@ -179,41 +179,50 @@ class Runner:
         env = dict(os.environ)
         env.update({k: str(v) for k, v in (body.get("env") or {}).items()})
         layout = body.get("layout", {})
+        executor = layout.get("executor") or ("ray" if layout.get("pp", 1) > 1 else "mp")
         if layout.get("pp_layer_partition"):
             env["VLLM_PP_LAYER_PARTITION"] = layout["pp_layer_partition"]
         procs = []
-
         head_addr = ray.get("head_addr")
         port = int(ray.get("port", 6379))
-        if role == "head":
+
+        if executor != "ray":
+            # single-node, mp executor: no Ray, head runs vLLM across the local GPUs.
+            cmd = self._vllm_cmd(body, executor="mp")
+            try:
+                procs.append(subprocess.Popen(cmd, env=env))
+            except FileNotFoundError as exc:
+                return {"ok": False, "error": str(exc)}
+        elif role == "head":
             _run(["ray", "stop"], timeout=30)
             rc, _, err = _run(["ray", "start", "--head", f"--port={port}"], timeout=60)
             if rc != 0:
                 return {"ok": False, "error": f"ray head failed: {err.strip()}"}
-            cmd = self._vllm_cmd(body)
             env["RAY_ADDRESS"] = f"{head_addr}:{port}"
+            cmd = self._vllm_cmd(body, executor="ray")
             try:
                 procs.append(subprocess.Popen(cmd, env=env))
             except FileNotFoundError as exc:
                 return {"ok": False, "error": str(exc)}
         else:
-            # worker: join the head's Ray cluster and block (Ray schedules vLLM workers)
+            # worker: join the head's Ray cluster (Ray schedules the vLLM workers here)
             rc, _, err = _run(["ray", "start", f"--address={head_addr}:{port}"], timeout=60)
             if rc != 0:
                 return {"ok": False, "error": f"ray worker join failed: {err.strip()}"}
 
         self._replicas[rid] = {"procs": procs, "role": role, "port": body.get("port"),
-                               "state": "SERVING"}
+                               "state": "SERVING", "executor": executor}
         return {"ok": True, "state": "SERVING",
-                "detail": f"{role} up" + (f" on :{body.get('port')}" if role == "head" else "")}
+                "detail": f"{role}/{executor} up"
+                          + (f" on :{body.get('port')}" if role == "head" else "")}
 
-    def _vllm_cmd(self, body: dict) -> list:
+    def _vllm_cmd(self, body: dict, executor: str = "ray") -> list:
         layout = body.get("layout", {})
         cmd = ["python3", "-m", "vllm.entrypoints.openai.api_server",
                "--model", body["model"],
                "--tensor-parallel-size", str(layout.get("tp", 1)),
                "--pipeline-parallel-size", str(layout.get("pp", 1)),
-               "--distributed-executor-backend", "ray",
+               "--distributed-executor-backend", executor,
                "--gpu-memory-utilization", str(body.get("gpu_memory_utilization", 0.85)),
                "--dtype", body.get("dtype", "auto"),
                "--host", "0.0.0.0", "--port", str(body.get("port", 8001))]

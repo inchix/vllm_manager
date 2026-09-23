@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 
 # make `admin` importable when run from the repo root
@@ -44,6 +45,17 @@ def _get(url: str) -> object:
     req = urllib.request.Request(url, headers={"X-API-Key": KEY})
     with urllib.request.urlopen(req, timeout=5) as r:
         return json.loads(r.read().decode())
+
+
+def _post(url: str, body: dict) -> object:
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, method="POST",
+                                 headers={"X-API-Key": KEY, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        return json.loads(e.read().decode())
 
 
 def _make_app(cfg_path: str):
@@ -88,6 +100,9 @@ async def _run_agent(port: int, seconds: float):
         "nodes": await loop.run_in_executor(None, _get, base + "/api/cluster/nodes"),
         "summary": await loop.run_in_executor(None, _get, base + "/api/cluster/summary"),
         "config": await loop.run_in_executor(None, _get, base + "/api/cluster/config"),
+        "plan": await loop.run_in_executor(None, _post, base + "/api/cluster/plan",
+                                           {"model": "/models/tiny", "node_ids": ["smoke-node"],
+                                            "port": 8001}),
     }
     agent._stop = True
     task.cancel()
@@ -146,13 +161,23 @@ def main() -> int:
         # telemetry: GPUs present only on a GPU box; assert the pipe works either way
         gpus = node.get("gpus", [])
         if gpus:
-            live = any(g.get("util") is not None or g.get("mem_used") is not None for g in gpus)
-            check("live GPU telemetry flowing", live)
+            has_live = any(g.get("util") is not None or g.get("mem_used") is not None
+                           for g in gpus)
+            check("live GPU telemetry flowing", has_live)
         else:
             print("NOTE: no GPUs on this host; telemetry pipe exercised with empty list")
     check("summary counts a node", summary["nodes_total"] >= 1)
     check("config snapshot has this node's detected inventory",
           "smoke-node" in cfg.get("nodes", {}))
+
+    # plan dry-run: single participant -> pp=1, mp executor, tp = gpu count
+    plan = live.get("plan", {})
+    check("plan dry-run ok", plan.get("ok") is True)
+    if plan.get("ok"):
+        lay = plan.get("layout", {})
+        check("plan pp=1 (single node)", lay.get("pp") == 1)
+        head = plan["commands"][0]["body"]
+        check("plan single-node executor is mp", head["layout"]["executor"] == "mp")
 
     print("\n" + ("ALL PASS" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1
