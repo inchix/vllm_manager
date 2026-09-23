@@ -136,6 +136,7 @@ def build_instance_plan(
     served_model_name: Optional[str] = None,
     max_model_len: Optional[int] = None,
     extra_args: Optional[list] = None,
+    language_model_only: bool = False,
 ) -> dict:
     """Produce {instance_id, layout, head_id, commands:[(node_id, ensure_instance_body)]}."""
     layout = compute_layout(nodes, head_id)
@@ -162,6 +163,11 @@ def build_instance_plan(
 
     def vllm_args_for() -> list:
         args = list(extra_args or [])
+        # Skip a multimodal model's vision tower. Its ViT attention goes through a
+        # Triton kernel that hangs on Volta (sm_70) — py-spy shows workers parked in
+        # vit_attn_wrappers.triton_attn_wrapper forever. Text-only inference is fine.
+        if language_model_only and "--language-model-only" not in args:
+            args.append("--language-model-only")
         # --enforce-eager is REQUIRED for the cluster PP path (CUDA-graph capture crashes on
         # V100+PP-over-RDMA); single-node graphs are fine, so only force it when pp>1.
         if layout["pp"] > 1 and head_cfg.get("enforce_eager", True) \

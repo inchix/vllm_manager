@@ -871,7 +871,8 @@ def build_cluster_router(hub: ClusterHub) -> APIRouter:
         res = hub.plan(
             d["model"], d["node_ids"], port=int(d.get("port", 8001)),
             num_layers=d.get("num_layers"), served_model_name=d.get("served_model_name"),
-            max_model_len=d.get("max_model_len"), extra_args=d.get("extra_args"))
+            max_model_len=d.get("max_model_len"), extra_args=d.get("extra_args"),
+            language_model_only=bool(d.get("language_model_only")))
         return JSONResponse(status_code=200 if res.get("ok") else 400, content=res)
 
     @router.post("/api/cluster/launch")
@@ -882,7 +883,8 @@ def build_cluster_router(hub: ClusterHub) -> APIRouter:
         res = await hub.launch(
             d["model"], d["node_ids"], port=int(d["port"]),
             num_layers=d.get("num_layers"), served_model_name=d.get("served_model_name"),
-            max_model_len=d.get("max_model_len"), extra_args=d.get("extra_args"))
+            max_model_len=d.get("max_model_len"), extra_args=d.get("extra_args"),
+            language_model_only=bool(d.get("language_model_only")))
         return JSONResponse(status_code=200 if res.get("ok") else 400, content=res)
 
     @router.post("/api/cluster/stop")
