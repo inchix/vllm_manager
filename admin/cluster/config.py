@@ -51,6 +51,10 @@ SETTINGS: dict = {
     "multigpu_executor": {"scope": "cluster", "type": "str", "help": "mp|ray (single-node)"},
     "disable_custom_all_reduce": {"scope": "node", "type": "bool", "help": "route reductions via NCCL"},
     "enforce_eager": {"scope": "cluster", "type": "bool", "help": "skip CUDA graph capture (Volta cluster)"},
+    "ray_cgraph_timeout": {"scope": "cluster", "type": "int",
+                           "help": "seconds Ray Compiled Graph waits for a PP stage transfer "
+                                   "(default 10 is too low for a large model in eager mode on "
+                                   "slow GPUs -> RayChannelTimeoutError kills the engine)"},
     "dtype": {"scope": "cluster", "type": "str", "help": "auto|bfloat16|..."},
     "max_model_len": {"scope": "cluster", "type": "int", "help": "context length"},
     "port_start": {"scope": "cluster", "type": "int", "help": "vLLM port range start"},
@@ -89,6 +93,8 @@ IMAGE_DEFAULTS: dict = {
     "multigpu_executor": "mp",
     "disable_custom_all_reduce": False,
     "enforce_eager": True,          # required for cluster launches on Volta (docs/04)
+    # Ray Compiled Graph's default 10s read timeout kills PP transfers on slow GPUs.
+    "ray_cgraph_timeout": 600,
     "dtype": "auto",
     "port_start": 8001,
     "port_end": 8010,

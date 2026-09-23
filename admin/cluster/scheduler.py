@@ -242,6 +242,11 @@ def _instance_env(cfg: dict, nccl_ifname: Optional[str] = None) -> dict:
             env[envname] = str(val)
     if nccl_ifname:
         env["NCCL_SOCKET_IFNAME"] = nccl_ifname   # cluster-wide list, local-first
+    # Ray Compiled Graph waits this long for a pipeline-stage tensor. The default (10s)
+    # is shorter than one eager-mode forward pass of a large model on Volta, so Ray
+    # raises RayChannelTimeoutError and tears the engine down mid-request.
+    if cfg.get("ray_cgraph_timeout"):
+        env["RAY_CGRAPH_get_timeout"] = str(cfg["ray_cgraph_timeout"])
     if cfg.get("nccl_p2p_disable"):
         env["NCCL_P2P_DISABLE"] = "1"
     if cfg.get("nccl_ib_disable"):
