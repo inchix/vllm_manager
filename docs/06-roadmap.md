@@ -28,20 +28,26 @@ bottleneck ever appears we revisit with actual numbers rather than a synthetic t
   live telemetry; reboot ebola → admin marks it DOWN within `HEARTBEAT_MISS`, then READY again
   automatically on reconnect. (The transition logic exists; the two-box run is the field check.)
 
-## Phase 2 — Scheduler + `ensure_replica` (single-node first)
+## Phase 2 — Scheduler + `ensure_replica` (single-node first) — 🟡 logic done, HW gate pending
 
 - Admin scheduler computes layout (TP/PP/partition) and emits `ensure_replica`.
 - Agent executes it: sets env, execs vLLM (reusing today's `vllm_manager` launch logic), reports
   health; reaps orphans and frees GPU reservations on stop/reconnect.
 - Start with **single-node** (`node_count=1`) to validate the reconcile path end-to-end without
   the fabric.
-- **Gate:** launch/stop a single-node replica on COVID purely via CCP; admin restart → replica
-  re-adopted by the reconciler (no reload); orphaned-process/GPU-reservation leaks gone.
+- ✅ Scheduler (`scheduler.py`) computes layout + memory-weighted partition + executor; runner
+  executes it (mp single-node / Ray multi-node); `POST /api/cluster/plan` dry-run; the v0.3.0
+  executor lessons encoded (mp single-node, Ray+`--enforce-eager` only multi-node,
+  `--disable-custom-all-reduce` for any multi-GPU). Unit-tested (`test_scheduler.py`, 10).
+- **Gate (needs container + GPUs):** launch/stop a single-node replica on COVID purely via CCP;
+  admin restart → replica re-adopted by the reconciler; orphaned-process/GPU-reservation leaks
+  gone.
 
-## Phase 3 — Storage role + mount coordination
+## Phase 3 — Storage role + mount coordination — 🟡 logic done, HW gate pending
 
-- `serve_storage` (start `modelfsd` **or** manage the kernel-RDMA export per Phase 0) and
-  `mount_storage`/`unmount_storage`; assert canonical path; gate `ensure_replica` on the mount.
+- ✅ `serve_storage` (starts `modelfsd`) + `mount_storage`/`unmount_storage` in the runner;
+  `hub._coordinate_storage()` serves on the storage node and mounts on each participant at the
+  canonical path before a replica loads, gating the launch on it.
 - Storage co-located on COVID; ebola mounts over the fabric.
 - **Gate:** ebola loads a model entirely through the coordinated mount; storage-node-down is
   detected and blocks new replicas with a clear message; a client read against a killed server
