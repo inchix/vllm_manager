@@ -4,18 +4,13 @@ Phased so each step is independently testable and nothing destabilises the worki
 Every phase has an explicit **gate** — a check that must pass on the real COVID+ebola hardware
 before moving on.
 
-## Phase 0 — Storage transport benchmark (prerequisite, no code)
+## Phase 0 — Storage transport decision (settled, no load test)
 
-Decide the storage transport with a number, not a guess. See the benchmark plan in
-[03-storage-modelfsd](03-storage-modelfsd.md).
-
-- Measure current **kernel NFS-over-RDMA** cold-load of a real model (GB/s + vLLM cold
-  `start_replica` wall-clock) from a participant.
-- Stand up `modelfsd` (or a minimal NFSv3/TCP export) on the RoCE IP; measure the same.
-- **Gate:** a decision recorded here — adopt `modelfsd` for `storage` if within ~1.5–2× of
-  kernel-RDMA on cold start; otherwise keep kernel-RDMA transport under CCP coordination and
-  defer `modelfsd`. Either way the rest of v0.4.0 proceeds (transport is pluggable).
-- Runs on the current setup **without disturbing it** (ebola is back at full 300 W).
+**Decided: `modelfsd` over RoCE-TCP for the `storage` role.** No benchmark gate — model load is a
+one-time bulk sequential read where TCP-over-RoCE is comfortably fast, and the operational wins
+dominate (see [03-storage-modelfsd](03-storage-modelfsd.md)). The transport stays **pluggable**
+(kernel-RDMA remains a fallback the control plane can drive), so if a *real* production
+bottleneck ever appears we revisit with actual numbers rather than a synthetic test.
 
 ## Phase 1 — Control plane skeleton (agent + CCP + registry)
 
@@ -61,9 +56,16 @@ Decide the storage transport with a number, not a guess. See the benchmark plan 
 
 - GPU selector shortcuts, gated-repo probe, preflight-as-agent-selfcheck (from
   [05-migration](05-migration.md)).
+- **Full cluster-config UI with per-node overrides** — every setting editable in the UI (not
+  just `.env`), cluster-wide defaults plus per-worker overrides, effective config pushed to each
+  agent over CCP. See [07-configuration](07-configuration.md). (The config *model* — layered
+  resolution, detected-vs-pushed settings — is used from Phase 1 onward; this phase completes the
+  editing surface.)
 - `setup.sh` role detection + CCP var generation.
 - Docs: user-facing README section, update `CHANGELOG.md`, refresh `TODO.md`.
-- **Gate:** a fresh two-box bring-up using only `setup.sh` + the UI, no manual `run.sh`.
+- **Gate:** a fresh two-box bring-up using only `setup.sh` + the UI, no manual `run.sh`; and
+  editing a per-worker setting (e.g. ebola's `NCCL_SOCKET_IFNAME`) in the UI takes effect on the
+  next replica start without touching any file.
 
 ## Phase 6 — Merge
 

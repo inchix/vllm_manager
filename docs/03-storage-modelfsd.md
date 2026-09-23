@@ -97,7 +97,7 @@ dead server returns errors rather than hanging the client (belt-and-braces with 
 The control plane owns this: `mount_storage` issues the mount, asserts the canonical path
 matches, and gates `start_replica` on the mount being present.
 
-## The transport trade-off — and the benchmark that decides it
+## The transport trade-off (decided: TCP)
 
 | | v0.3.0 today | `modelfsd` (v0.4.0) |
 |---|---|---|
@@ -115,22 +115,17 @@ access pattern**, which is favorable:
   further. A ~47 GB load at, say, 2–3 GB/s is ~16–24 s, paid once per replica start.
 
 **Adding a real RDMA transport to a userspace NFS server is exotic and a large lift — explicitly
-out of scope for v1.** Instead we *measure* before committing:
+out of scope for v1.** Giving up RDMA transport costs CPU and zero-copy, but for a one-time bulk
+sequential load over a 40–56 GbE-class RoCE NIC (multiple GB/s, with readahead), TCP is
+comfortably fast enough — a ~47 GB load is tens of seconds, paid once per replica start.
 
-### Benchmark plan (gates the decision, runs on the real hardware)
-
-1. **Baseline** — current kernel NFS-over-RDMA: drop caches, time a full sequential read of a
-   real model's weight shards from a participant (`dd`/`fio` sequential, plus a real vLLM cold
-   `start_replica` wall-clock). Record GB/s and load seconds.
-2. **Candidate** — `modelfsd` over RoCE-TCP: same model, same participant, same measurements.
-3. **Compare on the metric that matters** — *cold replica start time* and sustained sequential
-   GB/s. Decision rule: if `modelfsd` is within ~1.5–2× of kernel-RDMA on cold start, **adopt it**
-   — the operational wins (containerable, non-root, no-hang, C2-driven, already fuzz-tested)
-   dominate a one-time load cost. If it's dramatically worse, keep kernel-RDMA as the `storage`
-   transport for now and revisit (the role/CCP design is transport-agnostic — see below).
-
-This benchmark is Phase 0 / a prerequisite gate in [06-roadmap](06-roadmap.md), and can run on
-the current setup **without disturbing anything** now that ebola is back at full power.
+**Decision: go with `modelfsd` over RoCE-TCP for the `storage` role. No load-test gate.** The
+operational wins (containerable, non-root, no-hang, C2-driven, already fuzz-tested) clearly
+dominate a one-time load cost, and the access pattern is exactly the case where TCP is fine.
+We don't need to measure the obvious. If a *real-world* bottleneck ever shows up (e.g. very
+frequent cold starts, or many replicas loading at once), the transport is pluggable — see the
+escape hatch below — and we can revisit with actual production numbers rather than a synthetic
+benchmark.
 
 ## Transport-agnostic escape hatch
 

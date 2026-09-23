@@ -24,6 +24,11 @@ models over NFS) is kept; a real *control plane* goes on top.
   when the server vanishes." Transport (TCP vs kernel-RDMA) decided by a benchmark gate.
   ([docs/03](docs/03-storage-modelfsd.md))
 - **Cross-node GPU monitoring** falls out of the telemetry stream (GPUs grouped by host, live).
+- **All settings in the UI, with per-node overrides** — a layered config model (image defaults →
+  agent-detected → cluster defaults → per-worker override) with every knob (roles, NCCL/fabric,
+  executor, GPU power cap, storage, ports) editable from the admin UI. Heterogeneous workers
+  (e.g. COVID vs ebola: different NIC ordering, P2P, GID, power cap) are first-class, not `.env`
+  surgery. ([docs/07](docs/07-configuration.md))
 - **Opt-in and backward-compatible**: gated by `CONTROL_PLANE`; unset == exact v0.3.0 behaviour.
   Relationship to community PR #1 (`cluster-two-host-ray`) and the cherry-pick plan are in
   [docs/05](docs/05-migration.md); phased roadmap with hardware gates in [docs/06](docs/06-roadmap.md).

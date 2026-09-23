@@ -21,7 +21,8 @@ The three roles are orthogonal capabilities:
 | **storage** | The model repo, exported read-only over the fabric via `modelfsd`. **≥1** per cluster (see failure coupling below). | Local disk holding the models, an RDMA NIC. |
 
 A node's roles are set in its `.env` (or by `setup.sh` detection) and reported to the admin at
-registration. Nothing about the layout is hardcoded.
+registration — and, like every other setting, are **editable per-node from the UI** (see
+[07-configuration](07-configuration.md)). Nothing about the layout is hardcoded.
 
 ## Example topologies
 

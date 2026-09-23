@@ -20,7 +20,8 @@ SSH/manual orchestration with a small command-and-control protocol and composabl
 | [03 — Storage: `modelfsd`](03-storage-modelfsd.md) | The embedded read-only NFS daemon for model weights; transport trade-off and benchmark plan |
 | [04 — Execution / data plane](04-data-plane.md) | Ray + NCCL over RoCE, unchanged, now *driven by* the control plane; placement-group lifecycle |
 | [05 — Migration & compatibility](05-migration.md) | Relationship to v0.3.0 `CLUSTER_MODE` and to community PR #1; upgrade path; config |
-| [06 — Roadmap](06-roadmap.md) | Phased implementation plan with test/benchmark gates |
+| [06 — Roadmap](06-roadmap.md) | Phased implementation plan with hardware gates |
+| [07 — Configuration](07-configuration.md) | Layered config model, **per-node overrides**, full settings catalog, the all-settings UI |
 
 ## One-paragraph summary
 

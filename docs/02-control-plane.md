@@ -69,7 +69,8 @@ is the normative spec.
 
 | `type` | Purpose | `body` (key fields) |
 |--------|---------|---------------------|
-| `hello` | Accept registration | `assigned{}`, `heartbeat_sec`, `telemetry_sec`, `desired_state{}` (see reconciliation) |
+| `hello` | Accept registration | `assigned{}`, `heartbeat_sec`, `telemetry_sec`, `effective_config{}` (this node's merged config — see [07-configuration](07-configuration.md)), `desired_state{}` (see reconciliation) |
+| `set_config` | Push updated effective config after a UI edit | `effective_config{}`, `apply` (`now` for live-safe settings like power cap, else `next_start`) |
 | `ensure_replica` | Declare the desired replica shape this node participates in | `replica_id`, `role_in_replica` (`head`/`worker`), `ray{head_addr, port}`, `model`, `layout{tp, pp, pp_layer_partition?}`, `vllm_args[]` (incl. `--enforce-eager`), `port`, `env{}` |
 | `stop_replica` | Tear down a replica on this node | `replica_id`, `ray: bool` (also stop the Ray runtime — see PG-leak note) |
 | `mount_storage` | Ensure the model repo is mounted | `source{host, export, transport}`, `canonical_path`, `opts[]` |
