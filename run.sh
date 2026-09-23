@@ -72,6 +72,19 @@ HF_TOKEN="${HF_TOKEN:-}"
 CLUSTER_MODE="${CLUSTER_MODE:-false}"
 ADMIN_ROLE="${ADMIN_ROLE:-manager}"        # manager | worker
 RAY_HEAD_HOST="${RAY_HEAD_HOST:-}"         # manager box IP (required on workers)
+
+# v0.4.0 control plane (opt-in). When true, the container runs the agent/CCP path
+# (entrypoint.sh) and needs the SAME host-net + RDMA passthrough as CLUSTER_MODE.
+CONTROL_PLANE="${CONTROL_PLANE:-false}"
+ROLES="${ROLES:-}"                         # admin,participant,storage (else mapped from ADMIN_ROLE)
+CLUSTER_ID="${CLUSTER_ID:-default}"
+CCP_ADMIN_URL="${CCP_ADMIN_URL:-}"         # ws(s)://admin:port (workers); derived if empty
+CCP_TLS_INSECURE="${CCP_TLS_INSECURE:-}"
+NODE_ID="${NODE_ID:-}"
+CANONICAL_MODEL_PATH="${CANONICAL_MODEL_PATH:-}"
+CCP_HEARTBEAT_SEC="${CCP_HEARTBEAT_SEC:-}"
+CCP_TELEMETRY_SEC="${CCP_TELEMETRY_SEC:-}"
+CCP_HEARTBEAT_MISS="${CCP_HEARTBEAT_MISS:-}"
 RAY_HEAD_PORT="${RAY_HEAD_PORT:-6379}"
 RAY_NODE_IP="${RAY_NODE_IP:-}"             # this node's IP for Ray control traffic
 # NCCL tuning — ALL empty by default (let NCCL auto-detect); set per-fabric in .env.
@@ -204,10 +217,11 @@ fi
 # so the same files must exist at the same path on each box.
 RUN_ARGS+=(-v "$MODELS_DIR:/models${VOL_SUFFIX}")
 
-if [ "$CLUSTER_MODE" = "true" ]; then
-  # Host networking so Ray head/worker + NCCL can reach each other on the real
-  # host interfaces. A bridged NAT with fixed port maps cannot form a cluster
-  # (Ray uses a wide dynamic port range; NCCL needs the RoCE NIC IPs directly).
+if [ "$CLUSTER_MODE" = "true" ] || [ "$CONTROL_PLANE" = "true" ]; then
+  # Host networking so Ray + NCCL can reach each other on the real host interfaces.
+  # A bridged NAT with fixed port maps cannot form a cluster (Ray uses a wide dynamic
+  # port range; NCCL needs the RoCE NIC IPs directly). Applies to the legacy
+  # CLUSTER_MODE and the v0.4.0 control plane alike.
   RUN_ARGS+=(--network=host)
 
   # RDMA verbs device passthrough (RoCE/IB). Auto-detect if RDMA_DEVICES unset.
@@ -228,15 +242,39 @@ if [ "$CLUSTER_MODE" = "true" ]; then
   [ -n "$NCCL_SOCKET_IFNAME" ] && RUN_ARGS+=(-e "NCCL_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME")
   [ -n "$GLOO_SOCKET_IFNAME" ] && RUN_ARGS+=(-e "GLOO_SOCKET_IFNAME=$GLOO_SOCKET_IFNAME")
 
-  # Cluster / Ray wiring consumed by entrypoint.sh.
-  RUN_ARGS+=(-e "CLUSTER_MODE=true")
-  RUN_ARGS+=(-e "ADMIN_ROLE=$ADMIN_ROLE")
-  RUN_ARGS+=(-e "RAY_HEAD_PORT=$RAY_HEAD_PORT")
-  [ -n "$RAY_HEAD_HOST" ] && RUN_ARGS+=(-e "RAY_HEAD_HOST=$RAY_HEAD_HOST")
-  [ -n "$RAY_NODE_IP" ]   && RUN_ARGS+=(-e "RAY_NODE_IP=$RAY_NODE_IP")
+  if [ "$CLUSTER_MODE" = "true" ]; then
+    # Legacy v0.3.0 Ray wiring consumed by entrypoint.sh.
+    RUN_ARGS+=(-e "CLUSTER_MODE=true")
+    RUN_ARGS+=(-e "ADMIN_ROLE=$ADMIN_ROLE")
+    RUN_ARGS+=(-e "RAY_HEAD_PORT=$RAY_HEAD_PORT")
+    [ -n "$RAY_HEAD_HOST" ] && RUN_ARGS+=(-e "RAY_HEAD_HOST=$RAY_HEAD_HOST")
+    [ -n "$RAY_NODE_IP" ]   && RUN_ARGS+=(-e "RAY_NODE_IP=$RAY_NODE_IP")
+    [ "$ADMIN_ROLE" = "worker" ] && RUN_ARGS+=(--no-healthcheck)
+  fi
 
-  # A worker has no admin UI, so the image's 7080 healthcheck would flap.
-  [ "$ADMIN_ROLE" = "worker" ] && RUN_ARGS+=(--no-healthcheck)
+  if [ "$CONTROL_PLANE" = "true" ]; then
+    # v0.4.0 control-plane wiring consumed by entrypoint.sh + the agent.
+    RUN_ARGS+=(-e "CONTROL_PLANE=true")
+    [ -n "$ROLES" ]                && RUN_ARGS+=(-e "ROLES=$ROLES")
+    RUN_ARGS+=(-e "CLUSTER_ID=$CLUSTER_ID")
+    RUN_ARGS+=(-e "ADMIN_ROLE=$ADMIN_ROLE")          # legacy fallback for role mapping
+    RUN_ARGS+=(-e "RAY_HEAD_PORT=$RAY_HEAD_PORT")
+    [ -n "$RAY_HEAD_HOST" ]        && RUN_ARGS+=(-e "RAY_HEAD_HOST=$RAY_HEAD_HOST")
+    [ -n "$RAY_NODE_IP" ]          && RUN_ARGS+=(-e "RAY_NODE_IP=$RAY_NODE_IP")
+    [ -n "$CCP_ADMIN_URL" ]        && RUN_ARGS+=(-e "CCP_ADMIN_URL=$CCP_ADMIN_URL")
+    [ -n "$CCP_TLS_INSECURE" ]     && RUN_ARGS+=(-e "CCP_TLS_INSECURE=$CCP_TLS_INSECURE")
+    [ -n "$NODE_ID" ]              && RUN_ARGS+=(-e "NODE_ID=$NODE_ID")
+    [ -n "$CANONICAL_MODEL_PATH" ] && RUN_ARGS+=(-e "CANONICAL_MODEL_PATH=$CANONICAL_MODEL_PATH")
+    [ -n "$CCP_HEARTBEAT_SEC" ]    && RUN_ARGS+=(-e "CCP_HEARTBEAT_SEC=$CCP_HEARTBEAT_SEC")
+    [ -n "$CCP_TELEMETRY_SEC" ]    && RUN_ARGS+=(-e "CCP_TELEMETRY_SEC=$CCP_TELEMETRY_SEC")
+    [ -n "$CCP_HEARTBEAT_MISS" ]   && RUN_ARGS+=(-e "CCP_HEARTBEAT_MISS=$CCP_HEARTBEAT_MISS")
+    # non-admin nodes have no UI → skip the 7080 healthcheck
+    case ",${ROLES}," in
+      *,admin,*) : ;;
+      ,,) [ "$ADMIN_ROLE" = "worker" ] && RUN_ARGS+=(--no-healthcheck) ;;
+      *)  RUN_ARGS+=(--no-healthcheck) ;;
+    esac
+  fi
 else
   # Single-node: publish admin + vLLM ports as before. Admin port binds to the
   # requested host interface; vLLM ports stay on 0.0.0.0 for LAN reachability.

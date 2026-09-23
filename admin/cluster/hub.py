@@ -220,12 +220,51 @@ class ClusterHub:
                 "pp_layer_partition": plan["pp_layer_partition"],
                 "commands": [{"node_id": nid, "body": body} for nid, body in plan["commands"]]}
 
+    async def _coordinate_storage(self, participants: list) -> dict:
+        """Ensure a storage node is serving and each participant has the model mounted
+        at the canonical path before a replica loads weights (docs/01, docs/03)."""
+        storage = self.registry.storage_nodes(alive_only=True)
+        if not storage:
+            return {"ok": True, "detail": "no storage role; assuming models are local"}
+        snode = storage[0]
+        seff = self.config.effective(snode.node_id, snode.detected)
+        canonical = seff.get("canonical_model_path", "/export/llm_models")
+        export_dir = seff.get("storage_export_dir") or canonical
+        fabric = (snode.addresses.get("fabric") or [snode.addresses.get("mgmt", "")])
+        fabric_ip = fabric[0] if fabric else ""
+        transport = seff.get("storage_transport", "tcp")
+        results = {}
+        if transport == "tcp":   # modelfsd; kernel-RDMA export is managed out of band
+            listen = seff.get("storage_listen") or (fabric_ip + ":2049")
+            results[snode.node_id] = await self.send_command(
+                snode.node_id, protocol.make_frame(protocol.SERVE_STORAGE, {
+                    "export_dir": export_dir, "listen": listen,
+                    "allow": seff.get("storage_allow") or [],
+                    "readahead": seff.get("storage_readahead")}), timeout=30)
+        for p in participants:
+            if p.node_id == snode.node_id:
+                continue  # storage host reads locally, no mount
+            peff = self.config.effective(p.node_id, p.detected)
+            results[p.node_id] = await self.send_command(
+                p.node_id, protocol.make_frame(protocol.MOUNT_STORAGE, {
+                    "source": {"host": fabric_ip, "export": export_dir, "transport": transport},
+                    "canonical_path": peff.get("canonical_model_path", canonical),
+                    "opts": peff.get("mount_opts")}), timeout=45)
+        ok = all(r.get("ok") for r in results.values())
+        return {"ok": ok, "storage_host": snode.node_id, "transport": transport,
+                "results": results}
+
     async def launch(self, model: str, node_ids: list, *, port: int,
                      num_layers: Optional[int] = None, **kw) -> dict:
         nodes = [self.registry.get(n) for n in node_ids]
         nodes = [n for n in nodes if n is not None]
         if not nodes:
             return {"ok": False, "error": "no such participant nodes"}
+        if not kw.pop("skip_storage", False):
+            storage_res = await self._coordinate_storage(nodes)
+            if not storage_res.get("ok"):
+                return {"ok": False, "error": "storage coordination failed",
+                        "storage": storage_res}
         eff_by = {n.node_id: self.config.effective(n.node_id, n.detected) for n in nodes}
         replica_id = kw.pop("replica_id", None) or f"replica-{len(self._replicas) + 1}"
         try:
