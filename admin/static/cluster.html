@@ -49,7 +49,7 @@
   <section class="tab-panel" id="panel-workers">
     <div class="card-head">
       <h2 style="color:var(--text-subheading)">Workers <span class="muted">participant nodes</span></h2>
-      <span class="muted">polling <code>GET /api/cluster/nodes</code> every 3s</span>
+      <span class="muted">polling <code>GET /api/cluster/nodes</code> + <code>/shares</code> every 3s</span>
     </div>
     <div id="workers-content">
       <div class="banner banner-empty">Loading worker telemetry&hellip;</div>
@@ -59,11 +59,11 @@
   <!-- (C) Storage — nodes with the storage role -->
   <section class="tab-panel" id="panel-storage">
     <div class="card-head">
-      <h2 style="color:var(--text-subheading)">Storage <span class="muted">storage nodes</span></h2>
-      <span class="muted">polling <code>GET /api/cluster/nodes</code> every 3s</span>
+      <h2 style="color:var(--text-subheading)">Storage <span class="muted">volumes on storage nodes</span></h2>
+      <span class="muted">polling <code>GET /api/cluster/nodes</code> + <code>/shares</code> every 3s</span>
     </div>
     <div id="storage-content">
-      <div class="banner banner-empty">Loading storage status&hellip;</div>
+      <div class="banner banner-empty">Loading volumes&hellip;</div>
     </div>
   </section>
 

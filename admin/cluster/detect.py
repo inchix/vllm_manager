@@ -407,6 +407,47 @@ def detect_volumes() -> List[Dict[str, object]]:
     return vols
 
 
+def detect_interfaces() -> List[Dict[str, object]]:
+    """Every non-loopback IPv4 interface: [{name, ip, netmask, cidr, rdma}].
+
+    Drives the "which NIC/subnet do we serve NFS on?" picker — a node typically has a
+    management NIC and one or more RoCE fabric NICs, and you want to choose. Uses
+    ioctl rather than the `ip` CLI so it works inside the hardened container.
+    """
+    import fcntl
+    import ipaddress
+    import socket
+    import struct
+
+    out: List[Dict[str, object]] = []
+    try:
+        names = [n for _, n in socket.if_nameindex()]
+    except Exception:
+        return out
+    rdma_netdevs = {r.get("netdev") for r in detect_rdma() if r.get("netdev")}
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        for name in sorted(set(names)):
+            if name == "lo":
+                continue
+            try:
+                packed = struct.pack("256s", name[:15].encode())
+                ip = socket.inet_ntoa(fcntl.ioctl(s.fileno(), 0x8915, packed)[20:24])
+                mask = socket.inet_ntoa(fcntl.ioctl(s.fileno(), 0x891B, packed)[20:24])
+            except Exception:
+                continue
+            try:
+                bits = sum(bin(int(o)).count("1") for o in mask.split("."))
+                cidr = str(ipaddress.ip_network("%s/%d" % (ip, bits), strict=False))
+            except Exception:
+                bits, cidr = None, None
+            out.append({"name": name, "ip": ip, "netmask": mask, "cidr": cidr,
+                        "rdma": name in rdma_netdevs})
+    finally:
+        s.close()
+    return out
+
+
 def _mgmt_ip_socket() -> Optional[str]:
     """The default-route source IP (no `ip` CLI). No packets are sent."""
     try:
@@ -499,6 +540,7 @@ def detect_node() -> dict:
         "iommu": iommu,
         "rdma": rdma,
         "mgmt_ip": mgmt_ip,
+        "interfaces": detect_interfaces(),
         "volumes": detect_volumes(),
         "derived": derived,
     }

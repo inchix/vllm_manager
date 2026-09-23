@@ -155,6 +155,12 @@ class Runner:
             self._mounts[path] = {"source": f"{host}:{export}"}
             return {"ok": True, "detail": "already mounted"}
         os.makedirs(path, exist_ok=True)
+        # modelfsd listens on an advertised ephemeral port, so the NFS client needs
+        # both the NFS and MOUNT ports pinned to it.
+        port = src.get("port")
+        opts = [o for o in opts if not o.startswith(("port=", "mountport="))]
+        if port and str(port) != "2049":
+            opts += ["port=%s" % port, "mountport=%s" % port]
         cmd = ["mount", "-t", "nfs", "-o", ",".join(opts), f"{host}:{export}", path]
         rc, _, err = _run(["sudo"] + cmd, timeout=30)
         ok = rc == 0 or os.path.ismount(path)
@@ -183,12 +189,17 @@ class Runner:
             out.append({"path": path, "endpoint": s["endpoint"], "ok": alive})
         return out
 
-    def _next_share_port(self, base: int = 2049) -> int:
-        used = {s["port"] for s in self._shares.values()}
-        p = base
-        while p in used:
-            p += 1
-        return p
+    def _free_port(self, bind_ip: str = "") -> int:
+        """Let the OS pick a free ephemeral port. The chosen port is advertised to the
+        cluster (telemetry -> catalog -> mount), so nothing depends on a fixed number
+        and we never clash with the host's kernel nfsd on 2049."""
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind((bind_ip or "0.0.0.0", 0))
+            return s.getsockname()[1]
+        finally:
+            s.close()
 
     def serve_storage(self, body: dict) -> dict:
         """Export one local directory read-only via modelfsd. Multiple shares per node
@@ -214,7 +225,7 @@ class Runner:
                 port = self._next_share_port()
         else:
             bind_ip = listen or "0.0.0.0"
-            port = self._next_share_port(int(body.get("port_base", 2049)))
+            port = self._free_port(bind_ip)
         endpoint = "%s:%d" % (bind_ip, port)
 
         cmd = [binary, "--export", export, "--listen", endpoint]
@@ -223,14 +234,34 @@ class Runner:
             cmd += ["--allow", ",".join(allow)]
         if body.get("readahead"):
             cmd += ["--readahead", body["readahead"]]
+        # Capture stderr so a failed start reports modelfsd's actual complaint
+        # (port in use, bad path, bad --allow) rather than a generic message.
+        import tempfile
+        errf = tempfile.NamedTemporaryFile(prefix="modelfsd-", suffix=".err", delete=False)
         try:
-            proc = subprocess.Popen(cmd)
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=errf)
         except FileNotFoundError:
+            errf.close()
+            os.unlink(errf.name)
             return {"ok": False, "error": f"{binary} not found (build storage/modelfsd)"}
         time.sleep(0.6)
         if proc.poll() is not None:
-            return {"ok": False, "error": "modelfsd exited immediately (check path/port/allow)"}
-        self._shares[export] = {"proc": proc, "endpoint": endpoint, "port": port}
+            errf.flush()
+            detail = ""
+            try:
+                with open(errf.name, "r", errors="replace") as fh:
+                    detail = " | ".join(fh.read().strip().splitlines()[-3:])
+            except Exception:
+                pass
+            try:
+                os.unlink(errf.name)
+            except Exception:
+                pass
+            return {"ok": False,
+                    "error": "modelfsd failed on %s: %s" % (endpoint,
+                                                            detail or "exited immediately")}
+        self._shares[export] = {"proc": proc, "endpoint": endpoint, "port": port,
+                                "errfile": errf.name}
         return {"ok": True, "detail": "serving %s on %s" % (export, endpoint),
                 "endpoint": endpoint}
 
@@ -245,6 +276,11 @@ class Runner:
             time.sleep(1)
             if s["proc"].poll() is None:
                 s["proc"].kill()
+        if s.get("errfile"):
+            try:
+                os.unlink(s["errfile"])
+            except Exception:
+                pass
         return {"ok": True, "detail": "stopped sharing %s" % export}
 
     # -- model sync -------------------------------------------------------

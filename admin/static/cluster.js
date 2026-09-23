@@ -4,10 +4,14 @@
  * Renders four tabs on cluster.html, organized BY ROLE:
  *   (A) SUMMARY (default)  — cluster totals from GET /api/cluster/summary plus
  *       a compact one-row-per-node table. Every node appears once.
- *   (B) WORKERS            — nodes whose roles include `participant`: full
- *       per-GPU util/mem/temp/power telemetry cards + replicas. Polls ~3s.
- *   (C) STORAGE            — nodes whose roles include `storage`: export/mount
- *       status (+ GPUs if the node also participates). Polls ~3s.
+ *   (B) WORKERS            — nodes whose roles include `participant`: a
+ *       CLUSTER SHARES matrix (every share × every participant, with a Mount
+ *       checkbox per cell) followed by full per-GPU util/mem/temp/power
+ *       telemetry cards + replicas. Polls ~3s.
+ *   (C) STORAGE            — nodes whose roles include `storage`: the node's
+ *       VOLUMES (path/fs/size/used/free) each with a Share checkbox. No GPUs
+ *       here — a storage node that also participates shows its GPUs under
+ *       Workers. Polls ~3s.
  *   (D) CLUSTER CONFIGURATION — cluster defaults + one card per node, each
  *       setting showing DETECTED (read-only) vs OVERRIDE (input), a merged
  *       effective-config preview, and a Save button.
@@ -22,12 +26,17 @@
  *   GET /api/cluster/nodes  ->  [
  *     {
  *       node_id, hostname, roles:[...], state,   // state: READY|SERVING|DEGRADED|DOWN
+ *       addresses:{ mgmt, fabric:[...] },
+ *       interfaces:[{ name, ip, netmask, cidr, rdma }],   // may be absent
+ *       rdma:    [{ hca, ports:[...], gid_index, netdev, fabric_ip }],
  *       gpus:    [{ index, model, util, mem_used, mem_total, temp,
  *                   power_draw, power_limit }],
  *       replicas:[{ id, state, port }],
  *       mounts:  [{ path, source, ok }]
  *     }, ...
  *   ]
+ *   interfaces/rdma/mounts may be missing entirely (older agents) — every
+ *   renderer treats them as empty rather than throwing.
  *
  *   GET /api/cluster/config ->  {
  *     defaults: { <key>: <value>, ... },
@@ -35,18 +44,41 @@
  *       <node_id>: { detected:{...}, overrides:{...}, effective:{...} }
  *     }
  *   }
+ *   Polled alongside /nodes whenever a storage node exists: the Storage tab's
+ *   "Serve shares on" select reads nodes[<id>].effective.storage_bind_ip and
+ *   writes it back as a per-node override (see onBindNicChange).
  *
  *   POST /api/cluster/config   body:  {
  *     defaults: {...},
  *     nodes: { <node_id>: { overrides: {...} } }
  *   }
  *
+ *   GET /api/cluster/shares ->  {
+ *     shares: [{ id, node_id, path, endpoint, fstype,
+ *                total, used, free, ok,                    // sizes in BYTES
+ *                mounted_by:[{ node_id, path, ok, error? }] }],
+ *     volumes_by_node: {
+ *       <node_id>: [{ path, fstype, total, used, free, shared, endpoint }]
+ *     }
+ *   }
+ *   A 404 here means an older backend: the UI shows "shares unavailable"
+ *   instead of erroring, and the rest of the page keeps working.
+ *
+ *   POST /api/cluster/share  body: { node_id, path, enabled }
+ *       -> { ok: true } | { ok: false, error: "..." }
+ *       `path` is any directory on that node — a discovered volume root or a
+ *       user-typed subdirectory. The backend validates it.
+ *
+ *   POST /api/cluster/mount  body: { node_id, share_id, enabled, mount_path? }
+ *       -> { ok: true } | { ok: false, error: "..." }
+ *
  * Every request carries the admin key in an `X-API-Key` header (see apiFetch).
  * A 401 redirects to /login, matching the existing admin UI.
  *
  * ?mock=1  renders representative sample data (COVID {admin,participant,
  *          storage} + ebola {participant}) so the UI can be reviewed with no
- *          backend running.
+ *          backend running. The mock share/mount/add-share controls mutate the
+ *          in-memory sample data, so the interactions are clickable offline.
  * ==========================================================================*/
 
 const $ = id => document.getElementById(id);
@@ -95,10 +127,14 @@ function showToast(msg, type) {
   setTimeout(() => { if (t.parentNode) dismiss(); }, 5000);
 }
 
+/* Escape for both text content and quoted attribute values. Note innerHTML
+ * serialization of a text node escapes & < > but NOT quotes, so we add those
+ * ourselves — otherwise a value containing " would break out of an attribute
+ * (and out of the inline on* handlers the share/mount checkboxes use). */
 function escapeHtml(s) {
   const d = document.createElement('div');
   d.textContent = s == null ? '' : String(s);
-  return d.innerHTML;
+  return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 function toggleTheme() {
@@ -207,12 +243,24 @@ const ALL_FIELDS = SETTING_GROUPS.flatMap(g => g.fields);
  * ======================================================================= */
 let liveTimer = null;
 
+/* Shares/volumes snapshot from GET /api/cluster/shares.
+ * status: 'loading' | 'ok' | 'unavailable' (404 — older backend) | 'error' */
+let sharesState = { status: 'loading', shares: [], volumesByNode: {}, detail: '' };
+
+/* While a share/mount POST is in flight we skip the poll re-render so the
+ * optimistic checkbox state isn't clobbered mid-request. */
+let pendingOps = 0;
+
+/* Text typed into a node's "Add share" box, kept across re-renders. */
+const addShareDrafts = {};
+
 function hasRole(n, role) {
   return (n.roles || []).map(r => String(r).toLowerCase()).includes(role);
 }
 
 async function loadLive() {
-  if (MOCK) { renderLive(MOCK_SUMMARY, MOCK_NODES); return; }
+  if (pendingOps > 0) return;               // a toggle is mid-flight
+  if (MOCK) { sharesState = mockShares(); renderLive(MOCK_SUMMARY, MOCK_NODES); return; }
   try {
     const res = await apiFetch('/api/cluster/nodes');
     if (res.status === 404) { renderLiveOffline(); return; }
@@ -227,6 +275,9 @@ async function loadLive() {
       if (sres.ok) summary = await sres.json();
     } catch (e) { /* fall through to derived summary */ }
     if (!summary) summary = deriveSummary(nodeArr);
+    // Shares ride the same refresh cycle. A 404 (older backend) is not an
+    // error: the volumes/shares sections just say so and everything else works.
+    await loadShares();
     renderLive(summary, nodeArr);
   } catch (e) {
     // Network error or endpoint missing — degrade, don't throw.
@@ -234,10 +285,48 @@ async function loadLive() {
   }
 }
 
+async function loadShares() {
+  try {
+    const res = await apiFetch('/api/cluster/shares');
+    if (res.status === 404) {
+      sharesState = { status: 'unavailable', shares: [], volumesByNode: {}, detail: '' };
+      return;
+    }
+    if (!res.ok) {
+      sharesState = { status: 'error', shares: [], volumesByNode: {}, detail: 'HTTP ' + res.status };
+      return;
+    }
+    const data = await res.json();
+    sharesState = {
+      status: 'ok',
+      shares: Array.isArray(data && data.shares) ? data.shares : [],
+      volumesByNode: (data && data.volumes_by_node) || {},
+      detail: '',
+    };
+  } catch (e) {
+    sharesState = { status: 'error', shares: [], volumesByNode: {}, detail: e.message || 'request failed' };
+  }
+}
+
+// Force an immediate refresh (used after a successful share/mount toggle).
+function refreshLive() { loadLive(); }
+
 function renderLive(summary, nodes) {
   renderSummary(summary, nodes);
   renderWorkers(nodes);
   renderStorage(nodes);
+}
+
+/* Don't re-render a panel while the user is typing in it (the add-share box) —
+ * the 3s poll would otherwise drop focus and the caret mid-path. Checkboxes
+ * are left re-renderable: the poll re-asserting server truth is what we want. */
+function panelBusy(id) {
+  const el = $(id);
+  const a = document.activeElement;
+  if (!el || !a) return false;
+  const isText = (a.tagName || '').toUpperCase() === 'INPUT' &&
+                 String(a.type || 'text').toLowerCase() === 'text';
+  return isText && el.contains(a);
 }
 
 // Derive a summary from the node list when /api/cluster/summary is unavailable.
@@ -346,17 +435,97 @@ function renderSummary(summary, nodes) {
 /* ---- (B) WORKERS (participant role) ---- */
 function renderWorkers(nodes) {
   const el = $('workers-content');
+  if (panelBusy('workers-content')) return;
   const workers = nodes.filter(n => hasRole(n, 'participant'));
+  const sharesPanel = renderClusterShares(nodes, workers);
   if (!workers.length) {
-    el.innerHTML = '<div class="banner banner-empty">No participant (worker) nodes registered.</div>';
+    el.innerHTML = sharesPanel + '<div class="banner banner-empty">No participant (worker) nodes registered.</div>';
     return;
   }
-  el.innerHTML = workers.map(n => renderNode(n.hostname || n.node_id || 'unknown', n)).join('');
+  el.innerHTML = sharesPanel + workers.map(n => renderNode(n.hostname || n.node_id || 'unknown', n)).join('');
 }
 
-/* ---- (C) STORAGE (storage role) ---- */
+/* ---- Cluster shares matrix (Workers tab) ----
+ * One row per share advertised anywhere in the cluster, one column per
+ * participant node. The share's own source node reads it locally and needs no
+ * mount, so that cell renders "local" instead of a checkbox. */
+function renderClusterShares(nodes, workers) {
+  const head = `<div class="card-head"><h3 class="section-title">Cluster shares</h3>` +
+    `<span class="muted">mount a share on a participant node</span></div>`;
+  const wrap = body => `<div class="host-group shares-panel">${head}${body}</div>`;
+
+  if (sharesState.status === 'unavailable') {
+    return wrap('<div class="muted">Shares unavailable &mdash; this control plane does not expose ' +
+      '<code>GET /api/cluster/shares</code>.</div>');
+  }
+  if (sharesState.status === 'error') {
+    return wrap('<div class="muted">Shares unavailable' +
+      (sharesState.detail ? ' &mdash; ' + escapeHtml(sharesState.detail) : '') + '.</div>');
+  }
+  if (sharesState.status === 'loading') {
+    return wrap('<div class="muted">Loading shares&hellip;</div>');
+  }
+  const shares = sharesState.shares || [];
+  if (!shares.length) {
+    return wrap('<div class="muted">No shares advertised. Tick <strong>Share</strong> on a volume in the ' +
+      '<strong>Storage</strong> tab to publish one.</div>');
+  }
+
+  const byId = {};
+  nodes.forEach(n => { byId[n.node_id] = n; });
+
+  const cols = workers.map(w => `<th class="mount-col">${escapeHtml(w.hostname || w.node_id || '?')}` +
+    `<div class="col-sub">${escapeHtml(w.node_id || '')}</div></th>`).join('');
+
+  const rows = shares.map(s => {
+    const src = byId[s.node_id];
+    const srcName = (src && (src.hostname || src.node_id)) || s.node_id || '?';
+    const endpoint = s.endpoint ? ` <span class="dim">(${escapeHtml(s.endpoint)})</span>` : '';
+    const okMark = s.ok === false ? ' <span class="bad" title="share is not healthy">✗</span>' : '';
+    const cells = workers.map(w => renderMountCell(s, w)).join('');
+    return `
+      <tr>
+        <td class="mono">${escapeHtml(s.path || '')}${okMark}</td>
+        <td>${escapeHtml(srcName)}${endpoint}</td>
+        <td class="num">${fmtBytes(s.total)}</td>
+        ${cells}
+      </tr>`;
+  }).join('');
+
+  return wrap(`
+    <div class="table-wrap">
+      <table class="summary-table shares-table">
+        <thead><tr><th>Share</th><th>Source</th><th class="num">Size</th>${cols}</tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`);
+}
+
+function renderMountCell(share, worker) {
+  if (worker.node_id === share.node_id) {
+    return '<td class="mount-cell"><span class="muted">local</span></td>';
+  }
+  const m = (share.mounted_by || []).find(x => x && x.node_id === worker.node_id);
+  const checked = m ? ' checked' : '';
+  const mountPath = (m && m.path) || share.path || '';
+  let state;
+  if (!m) state = '<span class="mount-state muted">not mounted</span>';
+  else if (m.ok === false) state = `<span class="mount-state bad">${escapeHtml(m.error || 'mount failed')}</span>`;
+  else state = `<span class="mount-state mono">${escapeHtml(m.path || share.path || '')}</span>`;
+  const args = [worker.node_id, share.id, mountPath].map(jsArg).join(', ');
+  return `<td class="mount-cell">
+      <label class="chk"><input type="checkbox"${checked} onchange="onMountToggle(this, ${args})">
+      <span class="chk-label">mount</span></label>
+      ${state}
+    </td>`;
+}
+
+/* ---- (C) STORAGE (storage role) ----
+ * Volumes only. A storage node that also participates shows its GPUs under
+ * Workers, never here. */
 function renderStorage(nodes) {
   const el = $('storage-content');
+  if (panelBusy('storage-content')) return;
   const storageNodes = nodes.filter(n => hasRole(n, 'storage'));
   if (!storageNodes.length) {
     el.innerHTML = '<div class="banner banner-empty">No storage nodes registered.</div>';
@@ -365,48 +534,207 @@ function renderStorage(nodes) {
   el.innerHTML = storageNodes.map(renderStorageNode).join('');
 }
 
+/* Rows for one storage node: every discovered volume, plus any share whose
+ * path isn't a discovered volume root (a hand-added subdirectory). */
+function storageRowsFor(nodeId) {
+  const vols = (sharesState.volumesByNode || {})[nodeId] || [];
+  const rows = vols.map(v => ({
+    path: v.path, fstype: v.fstype, total: v.total, used: v.used, free: v.free,
+    shared: !!v.shared, endpoint: v.endpoint, custom: false,
+  }));
+  const seen = new Set(rows.map(r => r.path));
+  (sharesState.shares || []).forEach(s => {
+    if (s.node_id !== nodeId || seen.has(s.path)) return;
+    seen.add(s.path);
+    rows.push({
+      path: s.path, fstype: s.fstype, total: s.total, used: s.used, free: s.free,
+      shared: true, endpoint: s.endpoint, custom: true,
+    });
+  });
+  return rows;
+}
+
 function renderStorageNode(n) {
   const host = n.hostname || n.node_id || 'unknown';
+  const nodeId = n.node_id || '';
   const roles = (n.roles || []).map(r => `<span class="badge role-badge">${escapeHtml(r)}</span>`).join('');
   const st = (n.state || 'unknown').toUpperCase();
   const stCls = stateClass(n.state);
   const stateBadge = `<span class="badge state-badge ${stCls}"><span class="state-dot"></span>${escapeHtml(st)}</span>`;
 
-  const mounts = (n.mounts || []).length
-    ? `<div class="storage-table">
-         <div class="storage-row header"><span></span><span>Path</span><span>Source</span></div>
-         ${n.mounts.map(m => `
-           <div class="storage-row">
-             <span class="${m.ok ? 'ok' : 'bad'}">${m.ok ? '✔' : '✗'}</span>
-             <span class="mono">${escapeHtml(m.path || '')}</span>
-             <span class="mono dim">${escapeHtml(m.source || '')}</span>
-           </div>`).join('')}
-       </div>`
-    : '<div class="muted">No exports / mounts reported.</div>';
-
-  // GPUs on a storage node (the admin box often serves storage AND participates).
-  const gpuRows = (n.gpus || []).length
-    ? `<div class="sub-section"><div class="sub-title">GPUs on this node</div>
-         <div class="gpu-table">
-           <div class="gpu-row header"><span>#</span><span>Model</span><span>Utilisation</span><span>Memory</span><span>Temp</span><span>Power</span></div>
-           ${(n.gpus || []).map(renderGpuRow).join('')}
-         </div>
-       </div>`
-    : '';
+  let body;
+  if (sharesState.status === 'unavailable') {
+    body = '<div class="muted">Volumes unavailable &mdash; this control plane does not expose ' +
+      '<code>GET /api/cluster/shares</code>.</div>';
+  } else if (sharesState.status === 'error') {
+    body = '<div class="muted">Volumes unavailable' +
+      (sharesState.detail ? ' &mdash; ' + escapeHtml(sharesState.detail) : '') + '.</div>';
+  } else if (sharesState.status === 'loading') {
+    body = '<div class="muted">Loading volumes&hellip;</div>';
+  } else {
+    const rows = storageRowsFor(nodeId);
+    body = rows.length
+      ? `<div class="table-wrap">
+           <table class="summary-table vol-table">
+             <thead><tr><th>Volume</th><th>Filesystem</th><th class="num">Size</th><th class="num">Used</th><th class="num">Free</th><th class="num">Share</th></tr></thead>
+             <tbody>${rows.map(v => renderVolumeRow(nodeId, v)).join('')}</tbody>
+           </table>
+         </div>`
+      : '<div class="muted">No volumes reported on this node.</div>';
+    body += renderAddShare(nodeId);
+  }
 
   return `
     <div class="host-group">
       <div class="host-head">
         <span class="host-name">${escapeHtml(host)}</span>
-        <span class="host-id">${escapeHtml(n.node_id || '')}</span>
+        <span class="host-id">${escapeHtml(nodeId)}</span>
         ${addrHtml(n)}
         ${roles}
         ${stateBadge}
       </div>
-      <div class="storage-note">Serves the shared model repository to participant nodes.</div>
-      ${mounts}
-      ${gpuRows}
+      <div class="storage-note">Ticking <strong>Share</strong> exports that directory read-only over the fabric (modelfsd, NFSv3/TCP).</div>
+      ${body}
     </div>`;
+}
+
+function renderVolumeRow(nodeId, v) {
+  const args = [nodeId, v.path].map(jsArg).join(', ');
+  const endpoint = (v.shared && v.endpoint)
+    ? `<div class="share-endpoint mono">${escapeHtml(v.endpoint)}</div>` : '';
+  const custom = v.custom ? ' <span class="badge custom-badge">custom</span>' : '';
+  return `
+    <tr class="${v.custom ? 'vol-custom' : ''}">
+      <td class="mono">${escapeHtml(v.path || '')}${custom}${endpoint}</td>
+      <td>${escapeHtml(v.fstype || '—')}</td>
+      <td class="num">${fmtBytes(v.total)}</td>
+      <td class="num">${fmtBytes(v.used)}</td>
+      <td class="num">${fmtBytes(v.free)}</td>
+      <td class="num"><label class="chk"><input type="checkbox"${v.shared ? ' checked' : ''} onchange="onShareToggle(this, ${args})"></label></td>
+    </tr>`;
+}
+
+/* Shares aren't limited to the discovered volume roots — the container only
+ * sees what's bind-mounted into it, so any directory can be typed here. It
+ * posts to the same POST /api/cluster/share endpoint; the backend validates
+ * that the path exists and is a directory. */
+function renderAddShare(nodeId) {
+  const id = 'addshare-' + cssId(nodeId);
+  const draft = addShareDrafts[nodeId] || '';
+  const arg = jsArg(nodeId);
+  return `
+    <div class="add-share">
+      <label class="add-share-label" for="${id}">Add share</label>
+      <input id="${id}" type="text" spellcheck="false" placeholder="/models/public"
+             value="${escapeHtml(draft)}"
+             oninput="onAddShareInput(${arg})"
+             onkeydown="if(event.key==='Enter'){event.preventDefault();onAddShare(${arg});}">
+      <button class="btn btn-neutral" onclick="onAddShare(${arg})">Add</button>
+      <span class="muted add-share-note">any directory on this node — typically a subdirectory of a volume above</span>
+    </div>`;
+}
+
+/* =========================================================================
+ * SHARE / MOUNT ACTIONS
+ * ======================================================================= */
+
+/* JSON-encode a value as a JS string literal, then HTML-escape it, so it can
+ * be inlined into a double-quoted on* attribute. Paths and share ids contain
+ * ':' and '/' freely; quotes/backslashes survive the round trip. */
+function jsArg(v) {
+  return JSON.stringify(v == null ? '' : String(v))
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+async function postAction(url, body) {
+  try {
+    const res = await apiFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    let data = {};
+    try { data = await res.json(); } catch (e) { data = {}; }
+    if (res.status === 404) return { ok: false, error: 'endpoint unavailable (' + url + ')' };
+    if (!res.ok) return { ok: false, error: (data && data.error) || ('HTTP ' + res.status) };
+    if (data && data.ok === false) return { ok: false, error: data.error || 'request failed' };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message || 'request failed' };
+  }
+}
+
+async function onShareToggle(cb, nodeId, path) {
+  const enabled = !!cb.checked;
+  if (MOCK) { mockSetShared(nodeId, path, enabled); renderLive(MOCK_SUMMARY, MOCK_NODES); return; }
+  cb.disabled = true;
+  pendingOps++;
+  const r = await postAction('/api/cluster/share', { node_id: nodeId, path: path, enabled: enabled });
+  pendingOps--;
+  cb.disabled = false;
+  if (r.ok) {
+    showToast((enabled ? 'Sharing ' : 'Unshared ') + path + ' on ' + nodeId, 'success');
+    refreshLive();
+  } else {
+    cb.checked = !enabled;                          // revert
+    showToast('Share ' + path + ' failed: ' + r.error, 'error');
+  }
+}
+
+async function onMountToggle(cb, nodeId, shareId, mountPath) {
+  const enabled = !!cb.checked;
+  const body = { node_id: nodeId, share_id: shareId, enabled: enabled };
+  if (enabled && mountPath) body.mount_path = mountPath;
+  if (MOCK) { mockSetMounted(shareId, nodeId, enabled, mountPath); renderLive(MOCK_SUMMARY, MOCK_NODES); return; }
+  cb.disabled = true;
+  pendingOps++;
+  const r = await postAction('/api/cluster/mount', body);
+  pendingOps--;
+  cb.disabled = false;
+  if (r.ok) {
+    showToast((enabled ? 'Mounted ' : 'Unmounted ') + shareId + ' on ' + nodeId, 'success');
+    refreshLive();
+  } else {
+    cb.checked = !enabled;                          // revert
+    showToast('Mount ' + shareId + ' on ' + nodeId + ' failed: ' + r.error, 'error');
+  }
+}
+
+function onAddShareInput(nodeId) {
+  const el = $('addshare-' + cssId(nodeId));
+  addShareDrafts[nodeId] = el ? el.value : '';
+}
+
+async function onAddShare(nodeId) {
+  const el = $('addshare-' + cssId(nodeId));
+  const path = el ? el.value.trim() : '';
+  if (!path) { showToast('Enter a directory path to share.', 'warning'); if (el) el.focus(); return; }
+  addShareDrafts[nodeId] = path;
+
+  if (MOCK) {
+    mockSetShared(nodeId, path, true);
+    addShareDrafts[nodeId] = '';
+    if (el) { el.value = ''; el.blur(); }
+    renderLive(MOCK_SUMMARY, MOCK_NODES);
+    showToast('Mock mode: shared ' + path, 'success');
+    return;
+  }
+
+  if (el) el.disabled = true;
+  pendingOps++;
+  const r = await postAction('/api/cluster/share', { node_id: nodeId, path: path, enabled: true });
+  pendingOps--;
+  if (el) el.disabled = false;
+  if (r.ok) {
+    addShareDrafts[nodeId] = '';                    // clear only on success
+    if (el) { el.value = ''; el.blur(); }           // blur so the refresh can redraw
+    showToast('Sharing ' + path + ' on ' + nodeId, 'success');
+    refreshLive();
+  } else {
+    // Leave the input populated so the path can be corrected.
+    showToast('Cannot share ' + path + ': ' + r.error, 'error');
+    if (el) el.focus();
+  }
 }
 
 function addrHtml(n) {
@@ -434,6 +762,19 @@ function pct(a, b) { return b > 0 ? Math.max(0, Math.min(100, (a / b) * 100)) : 
 function fmtMb(mb) {
   if (mb == null) return '—';
   return mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : mb + ' MB';
+}
+
+/* Volume/share sizes arrive as BYTES. Binary units, one decimal. */
+function fmtBytes(b) {
+  const n = Number(b);
+  if (b == null || !isFinite(n)) return '—';
+  const KiB = 1024, MiB = KiB * 1024, GiB = MiB * 1024, TiB = GiB * 1024, PiB = TiB * 1024;
+  if (n >= PiB) return (n / PiB).toFixed(1) + ' PiB';
+  if (n >= TiB) return (n / TiB).toFixed(1) + ' TiB';
+  if (n >= GiB) return (n / GiB).toFixed(1) + ' GiB';
+  if (n >= MiB) return (n / MiB).toFixed(1) + ' MiB';
+  if (n >= KiB) return (n / KiB).toFixed(1) + ' KiB';
+  return Math.round(n) + ' B';
 }
 
 function renderNode(host, n) {
@@ -772,6 +1113,92 @@ const MOCK_NODES = [
     mounts: [{ path: '/export/models', source: 'covid:/export/models', ok: false }],
   },
 ];
+
+/* Sample GET /api/cluster/shares payload. COVID has two discovered volumes
+ * (/models shared, /scratch not) plus one hand-added subdirectory share
+ * (/models/public) that is NOT a volume root, so it renders as a "custom" row.
+ * ebola has /models mounted; the custom share is advertised but unmounted, so
+ * the Workers matrix shows both a ticked and an untickable-yet cell. */
+const MOCK_SHARES = {
+  shares: [
+    {
+      id: 'covid-a1b2:/models', node_id: 'covid-a1b2', path: '/models',
+      endpoint: '172.16.254.201:2049', fstype: 'ext4',
+      total: 983000000000, used: 442000000000, free: 541000000000, ok: true,
+      mounted_by: [{ node_id: 'ebola-c3d4', path: '/models', ok: true }],
+    },
+    {
+      id: 'covid-a1b2:/models/public', node_id: 'covid-a1b2', path: '/models/public',
+      endpoint: '172.16.254.201:2050', fstype: 'ext4',
+      total: 983000000000, used: 442000000000, free: 541000000000, ok: true,
+      mounted_by: [],
+    },
+  ],
+  volumes_by_node: {
+    'covid-a1b2': [
+      {
+        path: '/models', fstype: 'ext4',
+        total: 983000000000, used: 442000000000, free: 541000000000,
+        shared: true, endpoint: '172.16.254.201:2049',
+      },
+      {
+        path: '/scratch', fstype: 'xfs',
+        total: 2000000000000, used: 118000000000, free: 1882000000000,
+        shared: false,
+      },
+    ],
+  },
+};
+
+// Live mock state (mutated by the Share / Mount checkboxes so ?mock=1 is
+// interactive without a backend).
+let mockShareData = null;
+function mockShares() {
+  if (!mockShareData) mockShareData = deepClone(MOCK_SHARES);
+  return {
+    status: 'ok',
+    shares: mockShareData.shares,
+    volumesByNode: mockShareData.volumes_by_node,
+    detail: '',
+  };
+}
+
+function mockSetShared(nodeId, path, enabled) {
+  const d = mockShareData || (mockShareData = deepClone(MOCK_SHARES));
+  const vols = d.volumes_by_node[nodeId] || [];
+  const vol = vols.find(v => v.path === path);
+  const id = nodeId + ':' + path;
+  if (vol) vol.shared = enabled;
+  if (enabled) {
+    if (!d.shares.some(s => s.id === id)) {
+      d.shares.push({
+        id: id, node_id: nodeId, path: path,
+        endpoint: (vol && vol.endpoint) || '172.16.254.201:2049',
+        fstype: (vol && vol.fstype) || 'ext4',
+        total: vol ? vol.total : null, used: vol ? vol.used : null, free: vol ? vol.free : null,
+        ok: true, mounted_by: [],
+      });
+    }
+  } else {
+    d.shares = d.shares.filter(s => s.id !== id);
+  }
+  sharesState = mockShares();
+}
+
+function mockSetMounted(shareId, nodeId, enabled, mountPath) {
+  const d = mockShareData || (mockShareData = deepClone(MOCK_SHARES));
+  const s = d.shares.find(x => x.id === shareId);
+  if (!s) return;
+  s.mounted_by = s.mounted_by || [];
+  if (enabled) {
+    if (!s.mounted_by.some(m => m.node_id === nodeId)) {
+      s.mounted_by.push({ node_id: nodeId, path: mountPath || s.path, ok: true });
+    }
+  } else {
+    s.mounted_by = s.mounted_by.filter(m => m.node_id !== nodeId);
+  }
+  sharesState = mockShares();
+}
 
 // Totals as they'd come from GET /api/cluster/summary for the mock cluster.
 const MOCK_SUMMARY = {

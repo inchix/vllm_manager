@@ -65,6 +65,9 @@ class Node:
             "state": self.state,
             "connected": self.connected,
             "addresses": self.addresses,
+            # NICs/IPs and RDMA fabric detail, for the per-worker detail panel
+            "interfaces": (self.detected or {}).get("interfaces", []),
+            "rdma": self.rdma,
             "gpus": self.merged_gpus(),
             "replicas": self.replicas,
             "mounts": self.mounts,

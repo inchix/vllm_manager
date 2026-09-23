@@ -375,6 +375,20 @@ class ClusterHub:
         fabric = (node.addresses or {}).get("fabric") or []
         return fabric[0] if fabric else (node.addresses or {}).get("mgmt", "")
 
+    def _cluster_client_cidrs(self) -> list:
+        """Default allow-list for a share: every known cluster member address as /32.
+        modelfsd requires an explicit --allow, and this keeps it tight (cluster only)
+        without the user having to configure subnets by hand."""
+        cidrs = []
+        for n in self.registry.all():
+            addrs = (n.addresses or {})
+            for ip in ([addrs.get("mgmt")] + list(addrs.get("fabric") or [])):
+                if ip and "/" not in ip:
+                    cidr = ip + "/32"
+                    if cidr not in cidrs:
+                        cidrs.append(cidr)
+        return cidrs
+
     def _mounted_by(self, export_path: str, source_node_id: str) -> list:
         out = []
         for n in self.registry.all():
@@ -439,10 +453,12 @@ class ClusterHub:
             current.remove(path)
         if enabled:
             frame = protocol.make_frame(protocol.SERVE_STORAGE, {
-                "export_dir": path, "listen": self._fabric_ip(node),
-                "allow": eff.get("storage_allow") or [],
+                # user-selected NIC wins; else default to the RDMA fabric IP
+                "export_dir": path,
+                "listen": eff.get("storage_bind_ip") or self._fabric_ip(node),
+                # explicit config wins; otherwise allow exactly the cluster's members
+                "allow": eff.get("storage_allow") or self._cluster_client_cidrs(),
                 "readahead": eff.get("storage_readahead"),
-                "port_base": int(eff.get("storage_port_base", 2049)),
             })
         else:
             frame = protocol.make_frame(protocol.UNSHARE_STORAGE, {"export_dir": path})
