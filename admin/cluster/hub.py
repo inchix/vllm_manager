@@ -330,6 +330,26 @@ class ClusterHub:
         base = base or self.config.defaults().get("canonical_model_path") or "/models"
         return base.rstrip("/") + "/" + model
 
+    def model_num_layers(self, model_path: str) -> Optional[int]:
+        """Read the model's layer count from its config.json.
+
+        Without this the memory-weighted pipeline split never runs (it needs a layer
+        count), so vLLM falls back to an EVEN split — which hands a 16 GB node the
+        same number of layers as a 32 GB node and OOMs the small one. The admin has
+        the model repo mounted, so it can just look.
+        """
+        try:
+            with open(os.path.join(model_path, "config.json"), "r") as fh:
+                cfg = json.load(fh)
+        except (OSError, ValueError):
+            return None
+        for key in ("num_hidden_layers", "n_layer", "num_layers"):
+            v = cfg.get(key)
+            if isinstance(v, int) and v > 0:
+                return v
+        v = (cfg.get("text_config") or {}).get("num_hidden_layers")
+        return v if isinstance(v, int) and v > 0 else None
+
     def plan(self, model: str, node_ids: list, *, port: int,
              num_layers: Optional[int] = None, **kw) -> dict:
         """Compute the instance plan WITHOUT executing it (dry run for the UI)."""
@@ -339,6 +359,7 @@ class ClusterHub:
             return {"ok": False, "error": "no such participant nodes"}
         eff_by = {n.node_id: self.config.effective(n.node_id, n.detected) for n in nodes}
         model = self._resolve_model(model, nodes)
+        num_layers = num_layers or self.model_num_layers(model)
         try:
             plan = scheduler.build_instance_plan(
                 kw.pop("instance_id", "plan-preview"), nodes, model, eff_by,
@@ -400,6 +421,7 @@ class ClusterHub:
                         "storage": storage_res}
         eff_by = {n.node_id: self.config.effective(n.node_id, n.detected) for n in nodes}
         model = self._resolve_model(model, nodes)
+        num_layers = num_layers or self.model_num_layers(model)
         instance_id = kw.pop("instance_id", None) or f"instance-{len(self._instances) + 1}"
         try:
             plan = scheduler.build_instance_plan(

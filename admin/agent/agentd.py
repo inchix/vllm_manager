@@ -208,9 +208,13 @@ class Agent:
             res = await loop.run_in_executor(None, self._exec_command, ftype, body)
         except Exception as exc:  # noqa: BLE001
             res = {"ok": False, "error": str(exc)}
+        # Pass through any command-specific payload (e.g. get_logs' `lines`);
+        # the envelope used to keep only ok/state/detail/error and drop the rest.
+        extra = {k: v for k, v in res.items()
+                 if k not in ("ok", "state", "detail", "error")}
         await ws.send(protocol.encode(protocol.result(
             rid, ok=bool(res.get("ok")), state=res.get("state", ""),
-            detail=res.get("detail", ""), err=res.get("error", ""))))
+            detail=res.get("detail", ""), err=res.get("error", ""), **extra)))
 
     def _exec_command(self, ftype: str, body: dict) -> dict:
         r = self.runner

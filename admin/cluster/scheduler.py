@@ -29,7 +29,18 @@ def _gpu_count(node) -> int:
 
 
 def _node_mem_mb(node) -> int:
-    return sum(int(g.get("mem_total_mb") or 0) for g in node.gpus) or 0
+    """Effective capacity of a node for TP, in MB.
+
+    NOT the sum: tensor parallelism shards each tensor EVENLY across ranks, so a
+    TP group is bounded by its SMALLEST GPU — a node with a 32 GB and a 16 GB card
+    behaves like 2x16 GB, not 48 GB. Summing would over-weight that node and hand
+    it more pipeline layers than it can hold.
+    """
+    mems = [int(g.get("mem_total_mb") or 0) for g in node.gpus]
+    mems = [m for m in mems if m > 0]
+    if not mems:
+        return 0
+    return min(mems) * len(mems)
 
 
 def order_nodes(nodes: list, head_id: Optional[str] = None) -> list:

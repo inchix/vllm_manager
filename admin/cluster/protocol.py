@@ -234,9 +234,19 @@ def ack(reply_to: str, accepted: bool = True, note: str = "") -> dict:
 
 
 def result(reply_to: str, ok: bool, state: str = "", detail: str = "",
-           err: str = "") -> dict:
-    return make_frame(RESULT, {"ok": ok, "state": state, "detail": detail, "error": err},
-                      reply_to=reply_to)
+           err: str = "", **extra) -> dict:
+    """A command result.
+
+    `extra` carries command-specific payload (e.g. get_logs' `lines`). Without it
+    the envelope would silently drop everything but ok/state/detail/error, which is
+    exactly how the first get_logs returned an empty tail despite the agent reading
+    the file correctly.
+    """
+    body = {"ok": ok, "state": state, "detail": detail, "error": err}
+    for k, v in extra.items():
+        if k not in body:
+            body[k] = v
+    return make_frame(RESULT, body, reply_to=reply_to)
 
 
 def heartbeat(seq: int, uptime: float, load: Optional[list] = None) -> dict:
