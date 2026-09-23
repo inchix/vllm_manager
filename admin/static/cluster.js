@@ -1,12 +1,19 @@
 /* ============================================================================
  * cluster.js — control-plane cluster UI for vllm-multi-gpu (v0.4.0)
  *
- * Renders two panels on cluster.html:
- *   (A) LIVE CLUSTER MONITOR — nodes grouped by host, role + state badges,
- *       per-GPU util/mem/temp/power, replicas and mounts. Polls every ~3s.
- *   (B) CLUSTER CONFIGURATION — cluster defaults + one card per node, each
+ * Renders four tabs on cluster.html, organized BY ROLE:
+ *   (A) SUMMARY (default)  — cluster totals from GET /api/cluster/summary plus
+ *       a compact one-row-per-node table. Every node appears once.
+ *   (B) WORKERS            — nodes whose roles include `participant`: full
+ *       per-GPU util/mem/temp/power telemetry cards + replicas. Polls ~3s.
+ *   (C) STORAGE            — nodes whose roles include `storage`: export/mount
+ *       status (+ GPUs if the node also participates). Polls ~3s.
+ *   (D) CLUSTER CONFIGURATION — cluster defaults + one card per node, each
  *       setting showing DETECTED (read-only) vs OVERRIDE (input), a merged
  *       effective-config preview, and a Save button.
+ *
+ * Role filtering is by MEMBERSHIP, not exclusivity: a node with roles
+ * {participant,storage} shows under BOTH Workers and Storage.
  *
  * ---------------------------------------------------------------------------
  * API CONTRACT (assumed — endpoints may not exist yet; the UI degrades
@@ -191,30 +198,223 @@ const SETTING_GROUPS = [
 const ALL_FIELDS = SETTING_GROUPS.flatMap(g => g.fields);
 
 /* =========================================================================
- * (A) LIVE CLUSTER MONITOR
+ * LIVE TABS — Summary / Workers / Storage
+ *
+ * All three are driven from one poll: GET /api/cluster/nodes (+ /summary for
+ * the totals). Nodes are filtered BY ROLE MEMBERSHIP, not exclusivity — a node
+ * whose roles include both `participant` and `storage` appears under Workers
+ * AND Storage; Summary lists every node exactly once.
  * ======================================================================= */
-let monitorTimer = null;
+let liveTimer = null;
 
-async function loadNodes() {
-  if (MOCK) { renderMonitor(MOCK_NODES); return; }
+function hasRole(n, role) {
+  return (n.roles || []).map(r => String(r).toLowerCase()).includes(role);
+}
+
+async function loadLive() {
+  if (MOCK) { renderLive(MOCK_SUMMARY, MOCK_NODES); return; }
   try {
     const res = await apiFetch('/api/cluster/nodes');
-    if (res.status === 404) { renderOffline(); return; }
-    if (!res.ok) { renderOffline('control plane returned ' + res.status); return; }
+    if (res.status === 404) { renderLiveOffline(); return; }
+    if (!res.ok) { renderLiveOffline('control plane returned ' + res.status); return; }
     const nodes = await res.json();
-    renderMonitor(Array.isArray(nodes) ? nodes : []);
+    const nodeArr = Array.isArray(nodes) ? nodes : [];
+    // Summary totals come from /api/cluster/summary; fall back to a client-side
+    // derivation if that endpoint is unavailable.
+    let summary = null;
+    try {
+      const sres = await apiFetch('/api/cluster/summary');
+      if (sres.ok) summary = await sres.json();
+    } catch (e) { /* fall through to derived summary */ }
+    if (!summary) summary = deriveSummary(nodeArr);
+    renderLive(summary, nodeArr);
   } catch (e) {
     // Network error or endpoint missing — degrade, don't throw.
-    renderOffline();
+    renderLiveOffline();
   }
 }
 
-function renderOffline(detail) {
-  const el = $('monitor-content');
-  el.innerHTML =
-    '<div class="banner banner-offline">Control plane offline' +
+function renderLive(summary, nodes) {
+  renderSummary(summary, nodes);
+  renderWorkers(nodes);
+  renderStorage(nodes);
+}
+
+// Derive a summary from the node list when /api/cluster/summary is unavailable.
+function deriveSummary(nodes) {
+  const roles = { admin: 0, participant: 0, storage: 0 };
+  const replicas = {};
+  let gpus = 0, alive = 0;
+  nodes.forEach(n => {
+    if (hasRole(n, 'admin')) roles.admin++;
+    if (hasRole(n, 'participant')) roles.participant++;
+    if (hasRole(n, 'storage')) roles.storage++;
+    gpus += (n.gpus || []).length;
+    if (n.connected || ['ready', 'serving', 'degraded'].includes(String(n.state || '').toLowerCase())) alive++;
+    (n.replicas || []).forEach(r => {
+      const st = (r.state || 'unknown').toUpperCase();
+      replicas[st] = (replicas[st] || 0) + 1;
+    });
+  });
+  return { nodes_total: nodes.length, nodes_alive: alive, gpus_total: gpus, roles, replicas };
+}
+
+function renderLiveOffline(detail) {
+  const html = offlineBanner(detail);
+  ['summary-content', 'workers-content', 'storage-content'].forEach(id => {
+    const el = $(id); if (el) el.innerHTML = html;
+  });
+}
+
+function offlineBanner(detail) {
+  return '<div class="banner banner-offline">Control plane offline' +
     (detail ? ' — ' + escapeHtml(detail) : '') +
     '. No telemetry available. (Open with <code>?mock=1</code> to preview with sample data.)</div>';
+}
+
+/* ---- Per-node aggregate (used by the Summary table) ---- */
+function nodeAgg(n) {
+  const gpus = n.gpus || [];
+  let used = 0, total = 0, utilSum = 0, utilN = 0;
+  gpus.forEach(g => {
+    if (g.mem_used != null) used += g.mem_used;
+    if (g.mem_total != null) total += g.mem_total;
+    if (g.util != null) { utilSum += g.util; utilN++; }
+  });
+  return { count: gpus.length, memUsed: used, memTotal: total, util: utilN ? utilSum / utilN : null };
+}
+
+/* ---- (A) SUMMARY ---- */
+function renderSummary(summary, nodes) {
+  const el = $('summary-content');
+  const s = summary || {};
+  const roles = s.roles || {};
+  const replicaTotal = Object.values(s.replicas || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+
+  const tile = (val, label) =>
+    `<div class="stat-tile"><span class="stat-val">${val}</span><span class="stat-label">${escapeHtml(label)}</span></div>`;
+  const num = v => (v == null ? '—' : v);
+
+  const tiles = `
+    <div class="stat-row">
+      <div class="stat-tile">
+        <span class="stat-val">${num(s.nodes_alive)}<span class="stat-sub"> / ${num(s.nodes_total)}</span></span>
+        <span class="stat-label">Nodes alive</span>
+      </div>
+      ${tile(num(s.gpus_total), 'GPUs total')}
+      ${tile(roles.participant != null ? roles.participant : 0, 'Participant')}
+      ${tile(roles.storage != null ? roles.storage : 0, 'Storage')}
+      ${tile(roles.admin != null ? roles.admin : 0, 'Admin')}
+      ${tile(replicaTotal, 'Replicas')}
+    </div>`;
+
+  let table;
+  if (!nodes.length) {
+    table = '<div class="banner banner-empty">No nodes registered with the control plane yet.</div>';
+  } else {
+    const rows = nodes.map(n => {
+      const a = nodeAgg(n);
+      const roleBadges = (n.roles || []).map(r => `<span class="badge role-badge">${escapeHtml(r)}</span>`).join(' ');
+      const st = (n.state || 'unknown').toUpperCase();
+      const stCls = stateClass(n.state);
+      const memCell = a.memTotal > 0 ? `${fmtMb(a.memUsed)} / ${fmtMb(a.memTotal)}` : '—';
+      const utilCell = a.util == null ? '—' : Math.round(a.util) + '%';
+      return `
+        <tr>
+          <td class="mono">${escapeHtml(n.node_id || '')}</td>
+          <td>${escapeHtml(n.hostname || '')}</td>
+          <td>${roleBadges || '<span class="muted">—</span>'}</td>
+          <td><span class="badge state-badge ${stCls}"><span class="state-dot"></span>${escapeHtml(st)}</span></td>
+          <td class="num">${a.count}</td>
+          <td class="mono">${utilCell} util · ${memCell}</td>
+        </tr>`;
+    }).join('');
+    table = `
+      <div class="table-wrap">
+        <table class="summary-table">
+          <thead>
+            <tr><th>Node</th><th>Host</th><th>Roles</th><th>State</th><th class="num">GPUs</th><th>Mem / Util</th></tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  }
+
+  el.innerHTML = tiles + table;
+}
+
+/* ---- (B) WORKERS (participant role) ---- */
+function renderWorkers(nodes) {
+  const el = $('workers-content');
+  const workers = nodes.filter(n => hasRole(n, 'participant'));
+  if (!workers.length) {
+    el.innerHTML = '<div class="banner banner-empty">No participant (worker) nodes registered.</div>';
+    return;
+  }
+  el.innerHTML = workers.map(n => renderNode(n.hostname || n.node_id || 'unknown', n)).join('');
+}
+
+/* ---- (C) STORAGE (storage role) ---- */
+function renderStorage(nodes) {
+  const el = $('storage-content');
+  const storageNodes = nodes.filter(n => hasRole(n, 'storage'));
+  if (!storageNodes.length) {
+    el.innerHTML = '<div class="banner banner-empty">No storage nodes registered.</div>';
+    return;
+  }
+  el.innerHTML = storageNodes.map(renderStorageNode).join('');
+}
+
+function renderStorageNode(n) {
+  const host = n.hostname || n.node_id || 'unknown';
+  const roles = (n.roles || []).map(r => `<span class="badge role-badge">${escapeHtml(r)}</span>`).join('');
+  const st = (n.state || 'unknown').toUpperCase();
+  const stCls = stateClass(n.state);
+  const stateBadge = `<span class="badge state-badge ${stCls}"><span class="state-dot"></span>${escapeHtml(st)}</span>`;
+
+  const mounts = (n.mounts || []).length
+    ? `<div class="storage-table">
+         <div class="storage-row header"><span></span><span>Path</span><span>Source</span></div>
+         ${n.mounts.map(m => `
+           <div class="storage-row">
+             <span class="${m.ok ? 'ok' : 'bad'}">${m.ok ? '✔' : '✗'}</span>
+             <span class="mono">${escapeHtml(m.path || '')}</span>
+             <span class="mono dim">${escapeHtml(m.source || '')}</span>
+           </div>`).join('')}
+       </div>`
+    : '<div class="muted">No exports / mounts reported.</div>';
+
+  // GPUs on a storage node (the admin box often serves storage AND participates).
+  const gpuRows = (n.gpus || []).length
+    ? `<div class="sub-section"><div class="sub-title">GPUs on this node</div>
+         <div class="gpu-table">
+           <div class="gpu-row header"><span>#</span><span>Model</span><span>Utilisation</span><span>Memory</span><span>Temp</span><span>Power</span></div>
+           ${(n.gpus || []).map(renderGpuRow).join('')}
+         </div>
+       </div>`
+    : '';
+
+  return `
+    <div class="host-group">
+      <div class="host-head">
+        <span class="host-name">${escapeHtml(host)}</span>
+        <span class="host-id">${escapeHtml(n.node_id || '')}</span>
+        ${addrHtml(n)}
+        ${roles}
+        ${stateBadge}
+      </div>
+      <div class="storage-note">Serves the shared model repository to participant nodes.</div>
+      ${mounts}
+      ${gpuRows}
+    </div>`;
+}
+
+function addrHtml(n) {
+  const a = n.addresses || {};
+  const parts = [];
+  if (a.mgmt) parts.push('mgmt ' + a.mgmt);
+  if (a.fabric && a.fabric.length) parts.push('fabric ' + a.fabric.join(', '));
+  return parts.length ? `<span class="host-addr">${escapeHtml(parts.join(' · '))}</span>` : '';
 }
 
 function stateClass(state) {
@@ -234,26 +434,6 @@ function pct(a, b) { return b > 0 ? Math.max(0, Math.min(100, (a / b) * 100)) : 
 function fmtMb(mb) {
   if (mb == null) return '—';
   return mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : mb + ' MB';
-}
-
-function renderMonitor(nodes) {
-  const el = $('monitor-content');
-  if (!nodes.length) {
-    el.innerHTML = '<div class="banner banner-empty">No nodes registered with the control plane yet.</div>';
-    return;
-  }
-
-  // Group by hostname (a host may register more than one node record).
-  const byHost = {};
-  nodes.forEach(n => {
-    const h = n.hostname || n.node_id || 'unknown';
-    (byHost[h] = byHost[h] || []).push(n);
-  });
-
-  el.innerHTML = Object.keys(byHost).map(host => {
-    const hostNodes = byHost[host];
-    return hostNodes.map(n => renderNode(host, n)).join('');
-  }).join('');
 }
 
 function renderNode(host, n) {
@@ -287,6 +467,7 @@ function renderNode(host, n) {
       <div class="host-head">
         <span class="host-name">${escapeHtml(host)}</span>
         <span class="host-id">${escapeHtml(n.node_id || '')}</span>
+        ${addrHtml(n)}
         ${roles}
         ${stateBadge}
       </div>
@@ -568,7 +749,8 @@ async function saveConfig() {
 const MOCK_NODES = [
   {
     node_id: 'covid-a1b2', hostname: 'covid',
-    roles: ['admin', 'participant', 'storage'], state: 'SERVING',
+    roles: ['admin', 'participant', 'storage'], state: 'SERVING', connected: true,
+    addresses: { mgmt: '192.168.1.10', fabric: ['10.10.0.1'] },
     gpus: [
       { index: 0, model: 'Tesla V100-SXM2-32GB', util: 96, mem_used: 30210, mem_total: 32768, temp: 71, power_draw: 288, power_limit: 300 },
       { index: 1, model: 'Tesla V100-SXM2-32GB', util: 92, mem_used: 29880, mem_total: 32768, temp: 68, power_draw: 271, power_limit: 300 },
@@ -580,7 +762,8 @@ const MOCK_NODES = [
   },
   {
     node_id: 'ebola-c3d4', hostname: 'ebola',
-    roles: ['participant'], state: 'DEGRADED',
+    roles: ['participant'], state: 'DEGRADED', connected: true,
+    addresses: { mgmt: '192.168.1.11', fabric: ['10.10.0.2'] },
     gpus: [
       { index: 0, model: 'Tesla V100-PCIE-16GB', util: 88, mem_used: 15100, mem_total: 16384, temp: 86, power_draw: 148, power_limit: 150 },
       { index: 1, model: 'Tesla V100-PCIE-16GB', util: 0, mem_used: 4, mem_total: 16384, temp: 44, power_draw: 33, power_limit: 150 },
@@ -589,6 +772,15 @@ const MOCK_NODES = [
     mounts: [{ path: '/export/models', source: 'covid:/export/models', ok: false }],
   },
 ];
+
+// Totals as they'd come from GET /api/cluster/summary for the mock cluster.
+const MOCK_SUMMARY = {
+  nodes_total: 2,
+  nodes_alive: 2,
+  gpus_total: 6,
+  roles: { admin: 1, participant: 2, storage: 1 },
+  replicas: { HEALTHY: 1, FAILED: 1 },
+};
 
 const MOCK_CONFIG = {
   defaults: {
@@ -670,9 +862,9 @@ function init() {
     const badge = $('mock-badge');
     if (badge) badge.style.display = 'inline-flex';
   }
-  // Monitor is the default tab; start polling.
-  loadNodes();
-  monitorTimer = setInterval(loadNodes, POLL_MS);
+  // Summary is the default tab; the live poll feeds Summary/Workers/Storage.
+  loadLive();
+  liveTimer = setInterval(loadLive, POLL_MS);
 }
 
 document.addEventListener('DOMContentLoaded', init);

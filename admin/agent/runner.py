@@ -36,7 +36,57 @@ class Runner:
         self._mounts: dict = {}       # path -> {source, ok}
 
     # -- GPU telemetry ----------------------------------------------------
+    def _telemetry_via_pynvml(self):
+        """Live per-GPU stats via NVML (works in the hardened container). None if
+        NVML is unavailable, so the caller falls back to nvidia-smi."""
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+        except Exception:
+            return None
+        gpus = []
+        try:
+            for i in range(pynvml.nvmlDeviceGetCount()):
+                h = pynvml.nvmlDeviceGetHandleByIndex(i)
+                g = {"index": i}
+                try:
+                    g["util"] = float(pynvml.nvmlDeviceGetUtilizationRates(h).gpu)
+                except Exception:
+                    g["util"] = None
+                try:
+                    m = pynvml.nvmlDeviceGetMemoryInfo(h)
+                    g["mem_used"] = round(m.used / (1024 * 1024))
+                    g["mem_total"] = round(m.total / (1024 * 1024))
+                except Exception:
+                    pass
+                try:
+                    g["temp"] = float(pynvml.nvmlDeviceGetTemperature(
+                        h, pynvml.NVML_TEMPERATURE_GPU))
+                except Exception:
+                    pass
+                try:
+                    g["power_draw"] = round(pynvml.nvmlDeviceGetPowerUsage(h) / 1000.0, 2)
+                except Exception:
+                    pass
+                try:
+                    g["power_limit"] = round(
+                        pynvml.nvmlDeviceGetEnforcedPowerLimit(h) / 1000.0, 2)
+                except Exception:
+                    pass
+                gpus.append(g)
+        except Exception:
+            pass
+        finally:
+            try:
+                pynvml.nvmlShutdown()
+            except Exception:
+                pass
+        return gpus or None
+
     def gpu_telemetry(self) -> list:
+        via_nvml = self._telemetry_via_pynvml()
+        if via_nvml is not None:
+            return via_nvml
         rc, out, _ = _run([
             "nvidia-smi",
             "--query-gpu=index,utilization.gpu,memory.used,memory.total,temperature.gpu,"

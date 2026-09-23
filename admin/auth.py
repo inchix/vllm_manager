@@ -106,9 +106,14 @@ async def auth_middleware(request: Request, call_next):
     if is_authenticated(request):
         return await call_next(request)
 
-    # Browsers hitting "/" get redirected to the login page; API callers get 401.
-    if path == "/" or path.startswith("/static"):
-        return RedirectResponse(url="/login", status_code=302)
+    # Browser navigations (any non-API GET: "/", "/cluster", "/static/*", …) get
+    # redirected to the login page — carrying ?next= so login returns them here;
+    # API callers get a 401.
+    if request.method == "GET" and not path.startswith("/api/"):
+        from urllib.parse import quote
+        target = path + (("?" + request.url.query) if request.url.query else "")
+        return RedirectResponse(url="/login?next=" + quote(target, safe=""),
+                                status_code=302)
     return JSONResponse(
         status_code=401,
         content={"error": "Authentication required"},

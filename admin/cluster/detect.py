@@ -78,8 +78,44 @@ def _sorted_numeric(names: List[str]) -> List[str]:
 # GPU detection  (mirrors det_gpu_count, plus richer per-GPU inventory)
 # ---------------------------------------------------------------------------
 
+def _gpus_via_pynvml() -> Optional[List[Dict[str, object]]]:
+    """Per-GPU inventory via NVML (nvidia-ml-py). Works inside the hardened container
+    where the nvidia-smi CLI is absent but libnvidia-ml.so is mounted. None if NVML
+    is unavailable."""
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+    except Exception:
+        return None
+    gpus: List[Dict[str, object]] = []
+    try:
+        for i in range(pynvml.nvmlDeviceGetCount()):
+            h = pynvml.nvmlDeviceGetHandleByIndex(i)
+            name = pynvml.nvmlDeviceGetName(h)
+            uuid = pynvml.nvmlDeviceGetUUID(h)
+            mem = pynvml.nvmlDeviceGetMemoryInfo(h)
+            gpus.append({
+                "index": i,
+                "name": name.decode() if isinstance(name, bytes) else name,
+                "mem_total_mb": int(mem.total // (1024 * 1024)),
+                "uuid": uuid.decode() if isinstance(uuid, bytes) else uuid,
+            })
+    except Exception:
+        pass
+    finally:
+        try:
+            pynvml.nvmlShutdown()
+        except Exception:
+            pass
+    return gpus or None
+
+
 def detect_gpus() -> List[Dict[str, object]]:
-    """Return per-GPU inventory via nvidia-smi. [] when no GPUs / no driver."""
+    """Return per-GPU inventory. Prefers NVML (works in-container), falls back to
+    nvidia-smi. [] when no GPUs / no driver."""
+    via_nvml = _gpus_via_pynvml()
+    if via_nvml is not None:
+        return via_nvml
     out = _run([
         "nvidia-smi",
         "--query-gpu=index,name,memory.total,uuid",
@@ -115,10 +151,49 @@ def detect_gpus() -> List[Dict[str, object]]:
     return gpus
 
 
+def _nvlink_active_via_pynvml() -> Optional[bool]:
+    """True if any NVLink reports an active remote peer. None if NVML is
+    unavailable or the query isn't supported (caller falls back)."""
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+    except Exception:
+        return None
+    active = False
+    supported = False
+    try:
+        max_links = getattr(pynvml, "NVML_NVLINK_MAX_LINKS", 18)
+        for i in range(pynvml.nvmlDeviceGetCount()):
+            h = pynvml.nvmlDeviceGetHandleByIndex(i)
+            for link in range(max_links):
+                try:
+                    st = pynvml.nvmlDeviceGetNvLinkState(h, link)
+                except Exception:
+                    continue
+                supported = True
+                if st == getattr(pynvml, "NVML_FEATURE_ENABLED", 1):
+                    # a link can be "enabled" without a peer; require remote info
+                    try:
+                        pynvml.nvmlDeviceGetNvLinkRemotePciInfo(h, link)
+                        active = True
+                    except Exception:
+                        pass
+    except Exception:
+        return None
+    finally:
+        try:
+            pynvml.nvmlShutdown()
+        except Exception:
+            pass
+    return active if supported else None
+
+
 def detect_nvlink_active() -> bool:
-    """True only if at least one NVLink is active (mirrors det_nvlink):
-    an output line matches ``Link N:`` AND the output does not mention
-    "inactive" anywhere."""
+    """True only if at least one NVLink is active. Prefers NVML (in-container),
+    falls back to nvidia-smi (mirrors det_nvlink)."""
+    via_nvml = _nvlink_active_via_pynvml()
+    if via_nvml is not None:
+        return via_nvml
     out = _run(["nvidia-smi", "nvlink", "--status"])
     if not out:
         return False
@@ -190,24 +265,49 @@ def _rdma_link_netdevs() -> Dict[str, str]:
     return mapping
 
 
+def _netdev_via_sysfs(hca: str, port: int) -> Optional[str]:
+    """Netdev(s) for an HCA from sysfs (works without the rdma CLI). The device's
+    net dir lists all its netdevs; sorted, entry [port-1] is that port (mlx4/mlx5
+    name port 2 as <nic>d1, which sorts after port 1)."""
+    nets = sorted(_listdir(os.path.join(_IB_ROOT, hca, "device", "net")))
+    if not nets:
+        return None
+    idx = port - 1 if port and port - 1 < len(nets) else 0
+    return nets[idx]
+
+
 def detect_netdev(hca: str, port: int, cache: Optional[Dict[str, str]] = None) -> Optional[str]:
-    """Netdev bound to ``hca/port`` via ``rdma link show`` (mirrors det_netdev)."""
+    """Netdev bound to ``hca/port``. Prefers ``rdma link show``; falls back to sysfs
+    (mirrors det_netdev)."""
     mapping = cache if cache is not None else _rdma_link_netdevs()
-    return mapping.get("{}/{}".format(hca, port))
+    nd = mapping.get("{}/{}".format(hca, port))
+    return nd or _netdev_via_sysfs(hca, port)
+
+
+def _iface_ip_ioctl(netdev: str) -> Optional[str]:
+    """IPv4 of a NIC via SIOCGIFADDR (no `ip` CLI needed)."""
+    try:
+        import fcntl
+        import socket
+        import struct
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        packed = struct.pack("256s", netdev[:15].encode())
+        res = fcntl.ioctl(s.fileno(), 0x8915, packed)  # SIOCGIFADDR
+        return socket.inet_ntoa(res[20:24])
+    except Exception:
+        return None
 
 
 def detect_ip(netdev: str) -> Optional[str]:
-    """First IPv4 address on ``netdev`` (mirrors det_ip)."""
+    """First IPv4 address on ``netdev``. Prefers `ip`; falls back to ioctl."""
     if not netdev:
         return None
     out = _run(["ip", "-o", "-4", "addr", "show", "dev", netdev])
     for line in out.splitlines():
-        fields = line.split()
-        # `ip -o -4` fields: <idx>: <dev> inet <cidr> ...  → cidr is field[3]
-        for tok in fields:
+        for tok in line.split():
             if "/" in tok and re.match(r"^\d+\.\d+\.\d+\.\d+/\d+$", tok):
                 return tok.split("/")[0]
-    return None
+    return _iface_ip_ioctl(netdev)
 
 
 def detect_rdma() -> List[Dict[str, object]]:
@@ -239,12 +339,27 @@ def detect_rdma() -> List[Dict[str, object]]:
     return rdma
 
 
+def _mgmt_ip_socket() -> Optional[str]:
+    """The default-route source IP (no `ip` CLI). No packets are sent."""
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 1))
+            ip = s.getsockname()[0]
+        finally:
+            s.close()
+        return ip if ip and not ip.startswith("127.") else None
+    except Exception:
+        return None
+
+
 def detect_mgmt_ip() -> Optional[str]:
-    """First non-loopback IPv4 on the box (mirrors det_mgmt_ip)."""
+    """First non-loopback IPv4 on the box. Prefers `ip`; falls back to a socket
+    probe, then the RAY_NODE_IP env (set per node in .env)."""
     out = _run(["ip", "-o", "-4", "addr", "show"])
     for line in out.splitlines():
         fields = line.split()
-        # Skip the loopback interface (field index 1 is the dev name).
         if len(fields) >= 2 and fields[1] == "lo":
             continue
         for tok in fields:
@@ -252,7 +367,7 @@ def detect_mgmt_ip() -> Optional[str]:
                 ip = tok.split("/")[0]
                 if not ip.startswith("127."):
                     return ip
-    return None
+    return _mgmt_ip_socket() or (os.environ.get("RAY_NODE_IP") or None)
 
 
 # ---------------------------------------------------------------------------

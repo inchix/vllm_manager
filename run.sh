@@ -217,6 +217,15 @@ fi
 # so the same files must exist at the same path on each box.
 RUN_ARGS+=(-v "$MODELS_DIR:/models${VOL_SUFFIX}")
 
+# Dev iteration: bind-mount the host admin/ over the image's copy so Python/UI
+# changes apply on restart (Python) or refresh (static) WITHOUT a rebuild.
+# Off by default; set DEV_ADMIN_MOUNT=1 in .env while iterating.
+if [ "${DEV_ADMIN_MOUNT:-}" = "1" ]; then
+  _repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  RUN_ARGS+=(-v "$_repo_dir/admin:/app/admin:ro${VOL_SUFFIX:+,Z}")
+  echo "  DEV: bind-mounting $_repo_dir/admin -> /app/admin (no rebuild needed)"
+fi
+
 if [ "$CLUSTER_MODE" = "true" ] || [ "$CONTROL_PLANE" = "true" ]; then
   # Host networking so Ray + NCCL can reach each other on the real host interfaces.
   # A bridged NAT with fixed port maps cannot form a cluster (Ray uses a wide dynamic

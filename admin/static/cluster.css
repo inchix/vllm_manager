@@ -145,6 +145,35 @@ a:hover { text-decoration: underline; }
 .chip .bad { color: #f44336; }
 .chip .dim { color: var(--text-muted); }
 
+/* ---- Summary: totals tiles ---- */
+.stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 18px; }
+.stat-tile { background: var(--bg-card); border: 1px solid var(--border-card); border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; }
+.stat-val { font-size: 1.6rem; font-weight: 600; color: var(--text-heading); line-height: 1; }
+.stat-val .stat-sub { font-size: 1rem; font-weight: 400; color: var(--text-muted); }
+.stat-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary); }
+
+/* ---- Summary: compact node table ---- */
+.table-wrap { overflow-x: auto; background: var(--bg-card); border: 1px solid var(--border-card); border-radius: 8px; }
+.summary-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.summary-table th { text-align: left; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-muted); font-weight: 600; padding: 10px 14px; border-bottom: 1px solid var(--border-card); }
+.summary-table td { padding: 10px 14px; border-bottom: 1px solid var(--border-card); color: var(--text-primary); vertical-align: middle; }
+.summary-table tbody tr:last-child td { border-bottom: none; }
+.summary-table tbody tr:hover { background: var(--row-hover); }
+.summary-table .mono { font-family: ui-monospace, monospace; font-size: 0.8rem; }
+.summary-table .num, .summary-table th.num { text-align: right; }
+.summary-table .badge { margin-right: 2px; }
+
+/* ---- Storage: exports/mounts ---- */
+.host-addr { font-size: 0.75rem; color: var(--text-secondary); font-family: ui-monospace, monospace; }
+.storage-note { font-size: 0.82rem; color: var(--text-secondary); margin-bottom: 12px; }
+.storage-table { display: flex; flex-direction: column; gap: 6px; }
+.storage-row { display: grid; grid-template-columns: 24px minmax(160px, 1.2fr) 2fr; gap: 12px; align-items: center; padding: 9px 12px; background: var(--bg-input); border-radius: 6px; font-size: 0.85rem; }
+.storage-row.header { background: transparent; color: var(--text-muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em; padding: 2px 12px; }
+.storage-row .mono { font-family: ui-monospace, monospace; word-break: break-all; }
+.storage-row .dim { color: var(--text-muted); }
+.storage-row .ok { color: #4caf50; font-weight: 600; }
+.storage-row .bad { color: #f44336; font-weight: 600; }
+
 /* ---- Configuration ---- */
 .cfg-section-note { color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 14px; }
 .cfg-group { margin-bottom: 18px; }
@@ -206,4 +235,7 @@ button.btn { padding: 9px 20px; border: none; border-radius: 6px; font-size: 0.9
   .cfg-grid .cfg-field-label { margin-top: 8px; }
   .cfg-defaults-grid { grid-template-columns: 1fr; }
   .tabs { overflow-x: auto; }
+  .storage-row { grid-template-columns: 24px 1fr; }
+  .storage-row .mono.dim { grid-column: 2 / -1; }
+  .storage-row.header { display: none; }
 }

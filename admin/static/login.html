@@ -101,11 +101,20 @@
 <script>
   if (localStorage.getItem('theme') === 'light') document.body.classList.add('light-theme');
 
+  // Where to go after login: a same-origin ?next= path (e.g. /cluster), else "/".
+  function nextTarget() {
+    try {
+      const p = new URLSearchParams(location.search).get('next');
+      if (p && p.startsWith('/') && !p.startsWith('//')) return p;
+    } catch (e) {}
+    return '/';
+  }
+
   (async () => {
     try {
       const res = await fetch('/api/auth/status');
       const d = await res.json();
-      if (!d.auth_enabled || d.authenticated) window.location.href = '/';
+      if (!d.auth_enabled || d.authenticated) window.location.href = nextTarget();
     } catch (e) { /* ignore */ }
   })();
 
@@ -126,7 +135,7 @@
         body: JSON.stringify({ api_key: key }),
       });
       if (res.ok) {
-        window.location.href = '/';
+        window.location.href = nextTarget();
       } else {
         const d = await res.json().catch(() => ({}));
         errBox.textContent = d.error || 'Invalid API key';
