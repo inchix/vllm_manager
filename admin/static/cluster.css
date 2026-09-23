@@ -145,6 +145,49 @@ a:hover { text-decoration: underline; }
 .chip .bad { color: #f44336; }
 .chip .dim { color: var(--text-muted); }
 
+/* ---- Worker card: node detail (NICs / RDMA fabric / mounted shares) ----
+   Collapsed by default so the GPU rows stay the headline of the card. */
+.node-detail { margin-top: 12px; border-top: 1px solid var(--border-card); padding-top: 8px; }
+.node-detail > summary { cursor: pointer; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-muted); padding: 2px 0; list-style-position: outside; }
+.node-detail > summary:hover { color: var(--text-secondary); }
+.node-detail > summary .dim { text-transform: none; letter-spacing: 0; font-family: ui-monospace, monospace; font-size: 0.72rem; }
+.node-detail-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 10px; }
+.detail-block .sub-title { margin-bottom: 5px; }
+.detail-block .muted { font-size: 0.8rem; }
+
+.nic-list, .mount-list, .rdma-list { display: flex; flex-direction: column; gap: 3px; }
+.nic-row { display: grid; grid-template-columns: minmax(70px, 1fr) minmax(90px, 1.1fr) minmax(90px, 1.1fr) auto; gap: 8px; align-items: center; padding: 5px 9px; background: var(--bg-input); border-radius: 5px; font-size: 0.78rem; }
+.nic-row.header { background: transparent; padding: 0 9px 2px; color: var(--text-muted); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.03em; }
+.nic-row .mono { font-family: ui-monospace, monospace; word-break: break-all; }
+.nic-row .nic-name { color: var(--text-primary); }
+.nic-row .dim { color: var(--text-muted); }
+.rdma-badge { background: var(--bg-code); color: var(--accent); border: 1px solid var(--accent); padding: 1px 7px; font-size: 0.62rem; }
+
+.rdma-line { padding: 5px 9px; background: var(--bg-input); border-radius: 5px; font-size: 0.78rem; font-family: ui-monospace, monospace; word-break: break-word; }
+.rdma-line .dim { color: var(--text-muted); }
+
+.mount-row { display: grid; grid-template-columns: 14px minmax(80px, 1fr) minmax(90px, 1.2fr); gap: 8px; align-items: center; padding: 5px 9px; background: var(--bg-input); border-radius: 5px; font-size: 0.78rem; }
+.mount-row .mono { font-family: ui-monospace, monospace; word-break: break-all; }
+.mount-row .dim { color: var(--text-muted); }
+.mount-row .ok { color: #4caf50; font-weight: 600; }
+.mount-row .bad { color: #f44336; font-weight: 600; }
+
+/* ---- Networks block (Configuration tab) + its storage row (Storage tab) ---- */
+.net-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.net-row { display: flex; flex-direction: column; gap: 4px; }
+.net-label { font-size: 0.85rem; color: var(--text-primary); display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.net-label .net-key { font-family: ui-monospace, monospace; font-size: 0.72rem; color: var(--text-muted); }
+.net-control select, .net-control input { width: 100%; padding: 6px 8px; background: var(--bg-input); border: 1px solid var(--border-input); color: var(--text-primary); border-radius: 4px; font-size: 0.85rem; font-family: ui-monospace, monospace; }
+.net-control select:focus, .net-control input:focus { outline: none; border-color: var(--accent); }
+.net-control select:disabled { opacity: 0.6; cursor: progress; }
+.net-help { line-height: 1.45; }
+
+/* Storage tab: one row, a little wider, sitting above the volumes table. */
+.net-row-live { margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border-card); }
+.net-row-live .net-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-muted); }
+.net-row-live .net-control { max-width: 420px; }
+.net-row-live code { font-family: ui-monospace, monospace; }
+
 /* ---- Summary: totals tiles ---- */
 .stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 18px; }
 .stat-tile { background: var(--bg-card); border: 1px solid var(--border-card); border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; }
@@ -280,4 +323,15 @@ button.btn { padding: 9px 20px; border: none; border-radius: 6px; font-size: 0.9
   .shares-table .mount-cell { min-width: 108px; }
   .add-share-label { flex: 1 1 100%; }
   .add-share input { flex: 1 1 auto; }
+  /* Node detail + networks: single column, and the NIC/mount rows wrap
+     instead of squeezing four columns into ~380px. */
+  .node-detail-body { grid-template-columns: 1fr; }
+  /* name | ip  over  subnet | RDMA */
+  .nic-row { grid-template-columns: minmax(64px, 1fr) minmax(84px, 1fr); }
+  .nic-row > span:nth-child(4) { justify-self: start; }
+  .nic-row.header { display: none; }
+  .mount-row { grid-template-columns: 14px 1fr; }
+  .mount-row > span:nth-child(3) { grid-column: 2 / -1; }
+  .net-grid { grid-template-columns: 1fr; }
+  .net-row-live .net-control { max-width: none; }
 }

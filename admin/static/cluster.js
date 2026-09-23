@@ -42,11 +42,25 @@
  *     defaults: { <key>: <value>, ... },
  *     nodes: {
  *       <node_id>: { detected:{...}, overrides:{...}, effective:{...} }
- *     }
+ *     },
+ *     settings: { <key>: { group, widget, label, help } }
  *   }
- *   Polled alongside /nodes whenever a storage node exists: the Storage tab's
- *   "Serve shares on" select reads nodes[<id>].effective.storage_bind_ip and
- *   writes it back as a per-node override (see onBindNicChange).
+ *   `settings` is the server's setting catalog. Every entry with
+ *   group === "network" is rendered in the NETWORKS block (Configuration tab,
+ *   per-node card; the storage row is mirrored on the Storage tab), driven
+ *   entirely off that metadata so new network settings appear on their own.
+ *   widget decides what a picked interface contributes as the value:
+ *     "ip"       -> interfaces[].ip     (e.g. ray_node_ip, storage_bind_ip)
+ *     "nic"      -> interfaces[].name   (e.g. gloo_socket_ifname)
+ *     "nic-list" -> interfaces[].name   (server-side a comma list; the UI sets
+ *                                        the local NIC as the single value)
+ *   If a backend does not publish `settings`, NETWORK_SETTINGS_FALLBACK below
+ *   supplies the same four keys so the block still works.
+ *
+ *   POST /api/cluster/config   body (one key per change, from Storage tab):
+ *     { "nodes": { "<node_id>": { "overrides": { "storage_bind_ip": "1.2.3.4" } } } }
+ *   The Configuration tab batches every pending override into the same shape
+ *   when "Save configuration" is pressed.
  *
  *   POST /api/cluster/config   body:  {
  *     defaults: {...},
@@ -254,13 +268,63 @@ let pendingOps = 0;
 /* Text typed into a node's "Add share" box, kept across re-renders. */
 const addShareDrafts = {};
 
+/* Last node list seen by the poll, by node_id. The Configuration tab needs
+ * each node's `interfaces` (which only GET /api/cluster/nodes reports) to
+ * build the Networks selects; the poll starts on page load, so the map is
+ * populated well before that tab is opened. */
+let nodesById = {};
+
+/* Open/closed state of each worker card's "Node detail" disclosure, keyed by
+ * node_id — the 3s poll replaces the panel's innerHTML, so without this the
+ * section would snap shut on every refresh. */
+const nodeDetailOpen = {};
+
 function hasRole(n, role) {
   return (n.roles || []).map(r => String(r).toLowerCase()).includes(role);
 }
 
+/* -------------------------------------------------------------------------
+ * NETWORK INTERFACES
+ *
+ * Nodes report every interface the agent can see, container plumbing
+ * included. Podman/Docker/CNI bridges, veth pairs and `br-*` bridges are
+ * never the right answer for cluster, compute or storage traffic, so they are
+ * filtered out of both the worker detail list and the Networks selects.
+ * ---------------------------------------------------------------------- */
+const BRIDGE_IFACE_RE = /^(podman|docker|cni|veth|br-)/i;
+
+function isBridgeIface(name) {
+  return BRIDGE_IFACE_RE.test(String(name || ''));
+}
+
+// Real (non-bridge) interfaces of a node, always an array.
+function usableInterfaces(n) {
+  const list = (n && Array.isArray(n.interfaces)) ? n.interfaces : [];
+  return list.filter(i => i && !isBridgeIface(i.name));
+}
+
+// The node's RDMA fabric interface, if it reported one.
+function rdmaIface(n) {
+  return usableInterfaces(n).find(i => i.rdma) || null;
+}
+
+// "enp196s0 — 172.16.254.201 (172.16.254.0/24) · RDMA"
+function ifaceLabel(i) {
+  const sub = i.cidr || i.netmask || '';
+  return (i.name || '?') +
+    ' — ' + (i.ip || 'no address') +
+    (sub ? ' (' + sub + ')' : '') +
+    (i.rdma ? ' · RDMA' : '');
+}
+
 async function loadLive() {
   if (pendingOps > 0) return;               // a toggle is mid-flight
-  if (MOCK) { sharesState = mockShares(); renderLive(MOCK_SUMMARY, MOCK_NODES); return; }
+  if (MOCK) {
+    sharesState = mockShares();
+    configSnapshot = mockConfig();
+    renderLive(MOCK_SUMMARY, MOCK_NODES);
+    return;
+  }
   try {
     const res = await apiFetch('/api/cluster/nodes');
     if (res.status === 404) { renderLiveOffline(); return; }
@@ -278,6 +342,9 @@ async function loadLive() {
     // Shares ride the same refresh cycle. A 404 (older backend) is not an
     // error: the volumes/shares sections just say so and everything else works.
     await loadShares();
+    // …and so does the config snapshot, which the Storage tab's network row
+    // reads (effective.storage_bind_ip) and the Configuration tab reuses.
+    await loadConfigSnapshot(nodeArr);
     renderLive(summary, nodeArr);
   } catch (e) {
     // Network error or endpoint missing — degrade, don't throw.
@@ -308,25 +375,183 @@ async function loadShares() {
   }
 }
 
+/* Read-only snapshot of GET /api/cluster/config, refreshed on the live poll.
+ * Deliberately separate from `configState` (the Configuration tab's editable
+ * copy) so a poll can never clobber unsaved edits; loadConfig() adopts this
+ * snapshot instead of issuing a second request. */
+let configSnapshot = null;
+
+async function loadConfigSnapshot(nodes) {
+  // Only the Storage tab needs it on every cycle. With no storage node the
+  // Configuration tab fetches it itself when opened.
+  if (!nodes.some(n => hasRole(n, 'storage'))) return;
+  try {
+    const res = await apiFetch('/api/cluster/config');
+    if (!res.ok) return;                       // keep the last good snapshot
+    const data = await res.json();
+    if (data && typeof data === 'object') configSnapshot = data;
+  } catch (e) { /* keep the last good snapshot */ }
+}
+
 // Force an immediate refresh (used after a successful share/mount toggle).
 function refreshLive() { loadLive(); }
 
 function renderLive(summary, nodes) {
+  nodesById = {};
+  nodes.forEach(n => { if (n && n.node_id) nodesById[n.node_id] = n; });
   renderSummary(summary, nodes);
   renderWorkers(nodes);
   renderStorage(nodes);
 }
 
-/* Don't re-render a panel while the user is typing in it (the add-share box) —
- * the 3s poll would otherwise drop focus and the caret mid-path. Checkboxes
+/* =========================================================================
+ * NETWORKS — one picker per traffic type, driven by the server's setting
+ * catalog (GET /api/cluster/config -> settings) rather than a hardcoded list,
+ * so a new network setting shows up here without a UI change. Rendered in the
+ * Configuration tab's per-node card; the storage row is mirrored on the
+ * Storage tab, where it is the setting people actually go looking for.
+ * ======================================================================= */
+
+/* Used only when the backend publishes no `settings` catalog (older control
+ * plane). Same keys, same widgets the server tags. */
+const NETWORK_SETTINGS_FALLBACK = {
+  ray_node_ip: {
+    group: 'network', widget: 'ip', label: 'Cluster / control network',
+    help: 'Control-plane and Ray traffic; also this node’s identity in the cluster.',
+  },
+  nccl_socket_ifname: {
+    group: 'network', widget: 'nic-list', label: 'Compute (NCCL) network',
+    help: 'NCCL collectives between replicas. The local NIC is set first.',
+  },
+  gloo_socket_ifname: {
+    group: 'network', widget: 'nic', label: 'Compute (Gloo) NIC',
+    help: 'Gloo control collectives — a single local NIC.',
+  },
+  storage_bind_ip: {
+    group: 'network', widget: 'ip', label: 'Storage network',
+    help: 'Shares are served on this NIC. The port is chosen automatically and advertised to the cluster.',
+  },
+};
+
+// The settings catalog currently in hand (snapshot first, then the tab's copy).
+function settingsCatalog() {
+  const fromSnap = configSnapshot && configSnapshot.settings;
+  if (fromSnap && typeof fromSnap === 'object') return fromSnap;
+  const fromState = configState && configState.settings;
+  if (fromState && typeof fromState === 'object') return fromState;
+  return null;
+}
+
+/* Every network-group setting as [{ key, widget, label, help }], in catalog
+ * order. Falls back to NETWORK_SETTINGS_FALLBACK when the server tags none. */
+function networkSettings() {
+  const cat = settingsCatalog();
+  const out = [];
+  if (cat) {
+    Object.keys(cat).forEach(k => {
+      const m = cat[k] || {};
+      if (String(m.group || '').toLowerCase() === 'network') {
+        out.push({ key: k, widget: m.widget || 'ip', label: m.label || k, help: m.help || '' });
+      }
+    });
+  }
+  if (out.length) return out;
+  return Object.keys(NETWORK_SETTINGS_FALLBACK).map(k =>
+    Object.assign({ key: k }, NETWORK_SETTINGS_FALLBACK[k]));
+}
+
+function networkSetting(key) {
+  return networkSettings().find(s => s.key === key) || null;
+}
+
+/* Keys owned by the Networks block, lowercased. The legacy SETTING_GROUPS
+ * catalog below still lists some of these (as RAY_NODE_IP etc.); they are
+ * dropped from those groups so one setting never gets two controls. */
+function networkKeySet() {
+  const s = new Set();
+  networkSettings().forEach(n => s.add(String(n.key).toLowerCase()));
+  return s;
+}
+
+// What a picked interface contributes for this setting: its IP or its name.
+function ifaceValue(iface, setting) {
+  const w = String(setting.widget || 'ip').toLowerCase();
+  return String((w === 'nic' || w === 'nic-list') ? (iface.name || '') : (iface.ip || ''));
+}
+
+/* Preselection: an explicit override wins, then the server's effective value,
+ * then what the agent detected, then a sensible guess from the node's NICs —
+ * the RDMA fabric interface for compute/storage, the mgmt address for the
+ * cluster/control network. */
+function networkValue(node, entry, setting) {
+  const key = setting.key;
+  const srcs = [(entry && entry.overrides) || {}, (entry && entry.effective) || {}, (entry && entry.detected) || {}];
+  for (let i = 0; i < srcs.length; i++) {
+    const v = srcs[i][key];
+    if (v !== undefined && v !== null && v !== '') {
+      // nic-list values are comma lists server-side; the local NIC is first.
+      return String(v).split(',')[0].trim();
+    }
+  }
+  return networkFallback(node, setting);
+}
+
+function networkFallback(node, setting) {
+  const ifaces = usableInterfaces(node);
+  const rdma = rdmaIface(node);
+  const mgmt = ((node && node.addresses) || {}).mgmt || '';
+  const isControl = /ray|control|mgmt/i.test(String(setting.key));
+  if (isControl) {
+    const mgmtIface = ifaces.find(i => i.ip && i.ip === mgmt);
+    if (mgmtIface) return ifaceValue(mgmtIface, setting);
+    if (String(setting.widget).indexOf('nic') === 0) return rdma ? ifaceValue(rdma, setting) : '';
+    return mgmt || (rdma ? ifaceValue(rdma, setting) : '');
+  }
+  if (rdma) return ifaceValue(rdma, setting);
+  const first = ifaces.find(i => ifaceValue(i, setting));
+  return first ? ifaceValue(first, setting) : '';
+}
+
+/* <option> list for one setting on one node. `cur` is preselected; a current
+ * value that matches no reported NIC (stale config, or an agent that doesn't
+ * report interfaces) is kept as its own option so nothing is silently lost. */
+function networkOptions(node, setting, cur) {
+  const ifaces = usableInterfaces(node).filter(i => ifaceValue(i, setting));
+  let matched = false;
+  const opts = ifaces.map(i => {
+    const val = ifaceValue(i, setting);
+    let sel = '';
+    if (!matched && val === cur) { matched = true; sel = ' selected'; }
+    return `<option value="${escapeHtml(val)}"${sel}>${escapeHtml(ifaceLabel(i))}</option>`;
+  });
+  if (!matched && cur) {
+    opts.unshift(`<option value="${escapeHtml(cur)}" selected>${escapeHtml(cur)} — current (no matching NIC reported)</option>`);
+  }
+  if (!matched && !cur) {
+    opts.unshift('<option value="" selected>(not set)</option>');
+  }
+  return opts.join('');
+}
+
+// The config entry (detected/overrides/effective) for a node, from either copy.
+function configEntry(nodeId, preferState) {
+  const state = (configState && configState.nodes) || {};
+  const snap = (configSnapshot && configSnapshot.nodes) || {};
+  const a = preferState ? state[nodeId] : snap[nodeId];
+  return a || (preferState ? snap[nodeId] : state[nodeId]) || {};
+}
+
+/* Don't re-render a panel while the user is typing in it (the add-share box)
+ * or has a <select> focused (the network pickers) — the 3s poll would
+ * otherwise drop focus, the caret mid-path, or an open dropdown. Checkboxes
  * are left re-renderable: the poll re-asserting server truth is what we want. */
 function panelBusy(id) {
   const el = $(id);
   const a = document.activeElement;
   if (!el || !a) return false;
-  const isText = (a.tagName || '').toUpperCase() === 'INPUT' &&
-                 String(a.type || 'text').toLowerCase() === 'text';
-  return isText && el.contains(a);
+  const tag = (a.tagName || '').toUpperCase();
+  const isText = tag === 'INPUT' && String(a.type || 'text').toLowerCase() === 'text';
+  return (isText || tag === 'SELECT') && el.contains(a);
 }
 
 // Derive a summary from the node list when /api/cluster/summary is unavailable.
@@ -437,22 +662,22 @@ function renderWorkers(nodes) {
   const el = $('workers-content');
   if (panelBusy('workers-content')) return;
   const workers = nodes.filter(n => hasRole(n, 'participant'));
-  const sharesPanel = renderClusterShares(nodes, workers);
   if (!workers.length) {
-    el.innerHTML = sharesPanel + '<div class="banner banner-empty">No participant (worker) nodes registered.</div>';
+    el.innerHTML = '<div class="banner banner-empty">No participant (worker) nodes registered.</div>';
     return;
   }
-  el.innerHTML = sharesPanel + workers.map(n => renderNode(n.hostname || n.node_id || 'unknown', n)).join('');
+  el.innerHTML = workers.map(n => renderNode(n.hostname || n.node_id || 'unknown', n)).join('');
 }
 
-/* ---- Cluster shares matrix (Workers tab) ----
- * One row per share advertised anywhere in the cluster, one column per
- * participant node. The share's own source node reads it locally and needs no
- * mount, so that cell renders "local" instead of a checkbox. */
-function renderClusterShares(nodes, workers) {
-  const head = `<div class="card-head"><h3 class="section-title">Cluster shares</h3>` +
-    `<span class="muted">mount a share on a participant node</span></div>`;
-  const wrap = body => `<div class="host-group shares-panel">${head}${body}</div>`;
+/* ---- Available shares, per worker card ----
+ * Every share advertised anywhere in the cluster, listed on the node that
+ * would mount it: mounting is a per-node action, so the checkbox lives on the
+ * node it acts on. A share served BY this node needs no mount — that row says
+ * "local" instead. */
+function renderNodeShares(n) {
+  const nodeId = n.node_id || '';
+  const wrap = body =>
+    `<div class="sub-section node-shares"><div class="sub-title">Available shares</div>${body}</div>`;
 
   if (sharesState.status === 'unavailable') {
     return wrap('<div class="muted">Shares unavailable &mdash; this control plane does not expose ' +
@@ -467,57 +692,50 @@ function renderClusterShares(nodes, workers) {
   }
   const shares = sharesState.shares || [];
   if (!shares.length) {
-    return wrap('<div class="muted">No shares advertised. Tick <strong>Share</strong> on a volume in the ' +
+    return wrap('<div class="muted">No shares available &mdash; tick <strong>Share</strong> on a volume in the ' +
       '<strong>Storage</strong> tab to publish one.</div>');
   }
-
-  const byId = {};
-  nodes.forEach(n => { byId[n.node_id] = n; });
-
-  const cols = workers.map(w => `<th class="mount-col">${escapeHtml(w.hostname || w.node_id || '?')}` +
-    `<div class="col-sub">${escapeHtml(w.node_id || '')}</div></th>`).join('');
-
-  const rows = shares.map(s => {
-    const src = byId[s.node_id];
-    const srcName = (src && (src.hostname || src.node_id)) || s.node_id || '?';
-    const endpoint = s.endpoint ? ` <span class="dim">(${escapeHtml(s.endpoint)})</span>` : '';
-    const okMark = s.ok === false ? ' <span class="bad" title="share is not healthy">✗</span>' : '';
-    const cells = workers.map(w => renderMountCell(s, w)).join('');
-    return `
-      <tr>
-        <td class="mono">${escapeHtml(s.path || '')}${okMark}</td>
-        <td>${escapeHtml(srcName)}${endpoint}</td>
-        <td class="num">${fmtBytes(s.total)}</td>
-        ${cells}
-      </tr>`;
-  }).join('');
-
   return wrap(`
-    <div class="table-wrap">
-      <table class="summary-table shares-table">
-        <thead><tr><th>Share</th><th>Source</th><th class="num">Size</th>${cols}</tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
+    <div class="share-list">
+      <div class="share-row header"><span>Mount</span><span>Share</span><span>Size</span><span>State</span></div>
+      ${shares.map(s => renderNodeShareRow(nodeId, s)).join('')}
     </div>`);
 }
 
-function renderMountCell(share, worker) {
-  if (worker.node_id === share.node_id) {
-    return '<td class="mount-cell"><span class="muted">local</span></td>';
+function renderNodeShareRow(nodeId, s) {
+  const src = nodesById[s.node_id] || {};
+  const srcName = src.hostname || src.node_id || s.node_id || '?';
+  const srcTxt = srcName + (s.endpoint ? ' (' + s.endpoint + ')' : '');
+  const okMark = s.ok === false ? ' <span class="bad" title="share is not healthy">✗</span>' : '';
+  const size = fmtBytes(s.total) +
+    (s.free == null ? '' : ` <span class="dim">· ${fmtBytes(s.free)} free</span>`);
+
+  let control, state;
+  if (s.node_id === nodeId) {
+    // Served from this node — it reads the directory directly.
+    control = '<span class="muted">local</span>';
+    state = `<span class="mount-state muted">served by this node</span>`;
+  } else {
+    const m = (s.mounted_by || []).find(x => x && x.node_id === nodeId);
+    const mountPath = (m && m.path) || s.path || '';
+    const args = [nodeId, s.id, mountPath].map(jsArg).join(', ');
+    control = `<label class="chk"><input type="checkbox"${m ? ' checked' : ''} onchange="onMountToggle(this, ${args})">
+      <span class="chk-label">mount</span></label>`;
+    if (!m) state = '<span class="mount-state muted">not mounted</span>';
+    else if (m.ok === false) state = `<span class="mount-state bad">${escapeHtml(m.error || 'mount failed')}</span>`;
+    else state = `<span class="mount-state mono">${escapeHtml(m.path || s.path || '')}</span>`;
   }
-  const m = (share.mounted_by || []).find(x => x && x.node_id === worker.node_id);
-  const checked = m ? ' checked' : '';
-  const mountPath = (m && m.path) || share.path || '';
-  let state;
-  if (!m) state = '<span class="mount-state muted">not mounted</span>';
-  else if (m.ok === false) state = `<span class="mount-state bad">${escapeHtml(m.error || 'mount failed')}</span>`;
-  else state = `<span class="mount-state mono">${escapeHtml(m.path || share.path || '')}</span>`;
-  const args = [worker.node_id, share.id, mountPath].map(jsArg).join(', ');
-  return `<td class="mount-cell">
-      <label class="chk"><input type="checkbox"${checked} onchange="onMountToggle(this, ${args})">
-      <span class="chk-label">mount</span></label>
-      ${state}
-    </td>`;
+
+  return `
+    <div class="share-row">
+      <span class="share-mount">${control}</span>
+      <span class="share-what">
+        <span class="mono">${escapeHtml(s.path || '')}</span>${okMark}
+        <span class="share-src dim">${escapeHtml(srcTxt)}</span>
+      </span>
+      <span class="share-size mono">${size}</span>
+      <span class="share-state">${state}</span>
+    </div>`;
 }
 
 /* ---- (C) STORAGE (storage role) ----
@@ -594,8 +812,74 @@ function renderStorageNode(n) {
         ${stateBadge}
       </div>
       <div class="storage-note">Ticking <strong>Share</strong> exports that directory read-only over the fabric (modelfsd, NFSv3/TCP).</div>
+      ${renderStorageNetworkRow(n)}
       ${body}
     </div>`;
+}
+
+/* ---- Storage tab: the storage row of the Networks block ----
+ * Same picker as the Configuration tab's Networks block, mirrored here because
+ * this is where people are when they think about it. Unlike the config tab it
+ * saves on change (no Save button on a live-polling panel). */
+function renderStorageNetworkRow(n) {
+  const setting = networkSetting('storage_bind_ip');
+  if (!setting) return '';
+  const nodeId = n.node_id || '';
+  const entry = configEntry(nodeId);
+  const cur = networkValue(n, entry, setting);
+  const id = 'net-live-' + cssId(nodeId) + '-' + cssId(setting.key);
+  const ifaces = usableInterfaces(n).filter(i => ifaceValue(i, setting));
+
+  const control = ifaces.length
+    ? `<select id="${id}" data-prev="${escapeHtml(cur)}"
+               onchange="onNetworkLiveChange(this, ${jsArg(nodeId)}, ${jsArg(setting.key)})">
+         ${networkOptions(n, setting, cur)}
+       </select>`
+    : `<span class="muted">no interfaces reported by this node&rsquo;s agent${
+         cur ? ' — currently <code>' + escapeHtml(cur) + '</code>' : ''}</span>`;
+
+  return `
+    <div class="net-row net-row-live">
+      <label class="net-label" for="${id}">Serve shares on</label>
+      <div class="net-control">${control}</div>
+      <div class="net-help muted">${escapeHtml(setting.help ||
+        'Shares are served on this NIC. The port is chosen automatically and advertised to the cluster.')}
+        Changing the NIC only affects shares started afterwards — existing shares keep their current endpoint until re-shared.</div>
+    </div>`;
+}
+
+/* Live (save-on-change) network picker. Posts exactly one key:
+ *   { nodes: { <node_id>: { overrides: { <key>: <value> } } } } */
+async function onNetworkLiveChange(sel, nodeId, key) {
+  const val = sel.value;
+  const prev = sel.dataset ? (sel.dataset.prev || '') : '';
+  if (val === prev) return;
+  const body = { nodes: {} };
+  body.nodes[nodeId] = { overrides: {} };
+  body.nodes[nodeId].overrides[key] = val;
+
+  if (MOCK) {
+    mockSetOverride(nodeId, key, val);
+    if (sel.dataset) sel.dataset.prev = val;
+    showToast('Mock mode: ' + key + ' = ' + val + ' on ' + nodeId, 'success');
+    renderLive(MOCK_SUMMARY, MOCK_NODES);
+    return;
+  }
+
+  sel.disabled = true;
+  pendingOps++;
+  const r = await postAction('/api/cluster/config', body);
+  pendingOps--;
+  sel.disabled = false;
+  if (r.ok) {
+    if (sel.dataset) sel.dataset.prev = val;
+    showToast('Serving shares on ' + val + ' (' + nodeId + ')', 'success');
+    configLoaded = false;              // Configuration tab must re-read
+    refreshLive();
+  } else {
+    sel.value = prev;                  // revert
+    showToast('Could not set ' + key + ' on ' + nodeId + ': ' + r.error, 'error');
+  }
 }
 
 function renderVolumeRow(nodeId, v) {
@@ -797,12 +1081,6 @@ function renderNode(host, n) {
       }</div></div>`
     : '';
 
-  const mounts = (n.mounts || []).length
-    ? `<div class="sub-section"><div class="sub-title">Mounts</div><div class="chip-row">${
-        n.mounts.map(m => `<span class="chip"><span class="${m.ok ? 'ok' : 'bad'}">${m.ok ? '✔' : '✗'}</span> ${escapeHtml(m.path)} <span class="dim">${escapeHtml(m.source || '')}</span></span>`).join('')
-      }</div></div>`
-    : '';
-
   return `
     <div class="host-group">
       <div class="host-head">
@@ -814,8 +1092,90 @@ function renderNode(host, n) {
       </div>
       ${gpuRows}
       ${replicas}
-      ${mounts}
+      ${renderNodeShares(n)}
+      ${renderNodeDetail(n)}
     </div>`;
+}
+
+/* ---- Worker card: node detail (NICs / RDMA fabric / mounted shares) ----
+ * Collapsed by default so the GPU rows stay the headline; the open/closed
+ * state is remembered across the 3s re-render (nodeDetailOpen). Every field
+ * is optional — an older agent reporting none of them still renders. */
+function renderNodeDetail(n) {
+  const nodeId = n.node_id || '';
+  const ifaces = usableInterfaces(n);
+  const hcas = Array.isArray(n.rdma) ? n.rdma : [];
+  const mounts = Array.isArray(n.mounts) ? n.mounts : [];
+
+  const counts = [
+    ifaces.length + ' NIC' + (ifaces.length === 1 ? '' : 's'),
+    hcas.length ? hcas.length + ' HCA' + (hcas.length === 1 ? '' : 's') : '',
+    mounts.length + ' mount' + (mounts.length === 1 ? '' : 's'),
+  ].filter(Boolean).join(' · ');
+
+  const nicBody = ifaces.length
+    ? `<div class="nic-list">
+         <div class="nic-row header"><span>NIC</span><span>IP</span><span>Subnet</span><span></span></div>
+         ${ifaces.map(i => `
+           <div class="nic-row">
+             <span class="mono nic-name">${escapeHtml(i.name || '?')}</span>
+             <span class="mono">${escapeHtml(i.ip || '—')}</span>
+             <span class="mono dim">${escapeHtml(i.cidr || i.netmask || '—')}</span>
+             <span>${i.rdma ? '<span class="badge rdma-badge">RDMA</span>' : ''}</span>
+           </div>`).join('')}
+       </div>`
+    : '<div class="muted">no interfaces reported</div>';
+
+  const rdmaBody = hcas.length
+    ? `<div class="rdma-list">${hcas.map(r => `<div class="rdma-line mono">${rdmaLine(r)}</div>`).join('')}</div>`
+    : '<div class="muted">no RDMA devices reported</div>';
+
+  const mountBody = mounts.length
+    ? `<div class="mount-list">${mounts.map(m => `
+         <div class="mount-row">
+           <span class="${m.ok === false ? 'bad' : 'ok'}">${m.ok === false ? '✗' : '✔'}</span>
+           <span class="mono">${escapeHtml(m.path || '')}</span>
+           <span class="mono dim">${escapeHtml(m.source || '')}</span>
+         </div>`).join('')}</div>`
+    : '<div class="muted">no shares mounted</div>';
+
+  return `
+    <details class="node-detail"${nodeDetailOpen[nodeId] ? ' open' : ''}
+             ontoggle="onNodeDetailToggle(this, ${jsArg(nodeId)})">
+      <summary>Node detail <span class="dim">${escapeHtml(counts)}</span></summary>
+      <div class="node-detail-body">
+        <div class="detail-block">
+          <div class="sub-title">Network interfaces</div>
+          ${nicBody}
+        </div>
+        <div class="detail-block">
+          <div class="sub-title">RDMA fabric</div>
+          ${rdmaBody}
+        </div>
+        <div class="detail-block">
+          <div class="sub-title">Mounted shares</div>
+          ${mountBody}
+        </div>
+      </div>
+    </details>`;
+}
+
+// "mlx4_0 · ports 1,2 · GID 3 · enp196s0 · 172.16.254.201" — parts are skipped
+// when the agent doesn't report them.
+function rdmaLine(r) {
+  r = r || {};
+  const ports = Array.isArray(r.ports) ? r.ports : (r.ports == null || r.ports === '' ? [] : [r.ports]);
+  const parts = [];
+  if (r.hca) parts.push(escapeHtml(r.hca));
+  if (ports.length) parts.push('ports ' + escapeHtml(ports.join(',')));
+  if (r.gid_index != null && r.gid_index !== '') parts.push('GID ' + escapeHtml(r.gid_index));
+  if (r.netdev) parts.push(escapeHtml(r.netdev));
+  if (r.fabric_ip) parts.push(escapeHtml(r.fabric_ip));
+  return parts.length ? parts.join(' <span class="dim">·</span> ') : '<span class="muted">unknown device</span>';
+}
+
+function onNodeDetailToggle(el, nodeId) {
+  nodeDetailOpen[nodeId] = !!(el && el.open);
 }
 
 function renderGpuRow(g) {
@@ -845,16 +1205,30 @@ function renderGpuRow(g) {
  * (B) CLUSTER CONFIGURATION
  * ======================================================================= */
 let configLoaded = false;
-let configState = { defaults: {}, nodes: {} };   // authoritative snapshot from server/mock
+let configState = { defaults: {}, nodes: {}, settings: null };   // editable copy
+
+function adoptConfig(data) {
+  // Cloned: the poll keeps replacing `configSnapshot`, and edits here must not
+  // leak into it (nor be wiped by it).
+  configState = {
+    defaults: deepClone(data.defaults || {}),
+    nodes: deepClone(data.nodes || {}),
+    settings: data.settings ? deepClone(data.settings) : null,
+  };
+}
 
 async function loadConfig() {
-  if (MOCK) { configState = deepClone(MOCK_CONFIG); renderConfig(); configLoaded = true; return; }
+  if (MOCK) { adoptConfig(mockConfig()); renderConfig(); configLoaded = true; return; }
+  // The live poll already fetches /api/cluster/config whenever a storage node
+  // exists — reuse that snapshot rather than issuing a second request.
+  if (configSnapshot) { adoptConfig(configSnapshot); renderConfig(); configLoaded = true; return; }
   try {
     const res = await apiFetch('/api/cluster/config');
     if (res.status === 404) { renderConfigOffline(); return; }
     if (!res.ok) { renderConfigOffline('control plane returned ' + res.status); return; }
     const data = await res.json();
-    configState = { defaults: data.defaults || {}, nodes: data.nodes || {} };
+    configSnapshot = data;
+    adoptConfig(data);
     renderConfig();
     configLoaded = true;
   } catch (e) {
@@ -894,8 +1268,10 @@ function renderConfig() {
 }
 
 function renderDefaultsFields() {
+  const netKeys = networkKeySet();
   return SETTING_GROUPS.map(group => {
-    const fields = group.fields.filter(f => f.scope === 'cluster' || f.scope === 'both');
+    const fields = group.fields.filter(f =>
+      (f.scope === 'cluster' || f.scope === 'both') && !netKeys.has(String(f.key).toLowerCase()));
     if (!fields.length) return '';
     return `
       <div class="cfg-group">
@@ -918,8 +1294,12 @@ function renderNodeCard(nodeId) {
   const roleBadges = String(roles).split(',').filter(Boolean)
     .map(r => `<span class="badge role-badge">${escapeHtml(r.trim())}</span>`).join('');
 
+  const netKeys = networkKeySet();
   const groups = SETTING_GROUPS.map(group => {
-    const fields = group.fields;   // node cards show the full catalog
+    // Network settings have their own block above; drop the legacy catalog's
+    // copies (matched case-insensitively) so nothing gets two controls.
+    const fields = group.fields.filter(f => !netKeys.has(String(f.key).toLowerCase()));
+    if (!fields.length) return '';
     return `
       <div class="cfg-group">
         <h3>${escapeHtml(group.title)}</h3>
@@ -941,11 +1321,57 @@ function renderNodeCard(nodeId) {
           ${roleBadges}
         </div>
       </div>
+      ${renderNetworksBlock(nodeId)}
       ${groups}
       <details class="effective" open>
         <summary>Effective config (merged, read-only preview)</summary>
         <pre id="eff-${cssId(nodeId)}">${renderEffective(nodeId)}</pre>
       </details>
+    </div>`;
+}
+
+/* ---- Configuration tab: the Networks block ----
+ * One picker per network setting the server tags with group "network"
+ * (cluster/control, compute NCCL, compute Gloo, storage). Options come from
+ * the node's reported interfaces — the same list, bridge-filtered, for all of
+ * them; only the value differs (ip vs NIC name, per `widget`).
+ *
+ * These write into configState.overrides exactly like every other field on
+ * this tab, so "Save configuration" batches them into the one POST:
+ *   { defaults: {...}, nodes: { <node_id>: { overrides: { ... } } } } */
+function renderNetworksBlock(nodeId) {
+  const settings = networkSettings();
+  if (!settings.length) return '';
+  const node = nodesById[nodeId] || {};
+  const entry = configEntry(nodeId, true);
+  const ifaces = usableInterfaces(node);
+
+  const rows = settings.map(s => {
+    const cur = networkValue(node, entry, s);
+    const inputId = 'ov-' + cssId(nodeId) + '-' + s.key;
+    const onIn = `onOverrideInput('${nodeId}','${s.key}')`;
+    const control = ifaces.filter(i => ifaceValue(i, s)).length
+      ? `<select id="${inputId}" oninput="${onIn}" onchange="${onIn}">${networkOptions(node, s, cur)}</select>`
+      : `<input type="text" id="${inputId}" value="${escapeHtml(cur)}" oninput="${onIn}" onchange="${onIn}"
+                placeholder="${escapeHtml(String(s.widget).indexOf('nic') === 0 ? 'NIC name' : 'IP address')}">`;
+    return `
+      <div class="net-row">
+        <label class="net-label" for="${inputId}">${escapeHtml(s.label || s.key)}
+          <code class="net-key">${escapeHtml(s.key)}</code></label>
+        <div class="net-control">${control}</div>
+        ${s.help ? `<div class="net-help muted">${escapeHtml(s.help)}</div>` : ''}
+      </div>`;
+  }).join('');
+
+  const note = ifaces.length
+    ? 'Pick which NIC carries each kind of traffic. Options are this node&rsquo;s interfaces (container bridges excluded).'
+    : 'This node reports no interfaces &mdash; values can still be typed by hand.';
+
+  return `
+    <div class="cfg-group net-group">
+      <h3>Networks</h3>
+      <div class="cfg-section-note">${note}</div>
+      <div class="net-grid">${rows}</div>
     </div>`;
 }
 
@@ -1074,7 +1500,10 @@ async function saveConfig() {
     if (!res.ok) { showToast(data.error || ('Save failed (' + res.status + ')'), 'error'); }
     else {
       showToast('Configuration saved', 'success');
-      // Reload to pick up server-recomputed effective config.
+      // Reload to pick up server-recomputed effective config. Drop the poll's
+      // snapshot first so loadConfig() re-reads instead of adopting pre-save
+      // values.
+      configSnapshot = null;
       configLoaded = false;
       loadConfig();
     }
@@ -1091,7 +1520,20 @@ const MOCK_NODES = [
   {
     node_id: 'covid-a1b2', hostname: 'covid',
     roles: ['admin', 'participant', 'storage'], state: 'SERVING', connected: true,
-    addresses: { mgmt: '192.168.1.10', fabric: ['10.10.0.1'] },
+    addresses: { mgmt: '192.168.1.10', fabric: ['172.16.254.201'] },
+    // Container bridges are included on purpose: podman0/veth* must never
+    // reach the NIC lists or the Networks selects.
+    interfaces: [
+      { name: 'ens2', ip: '192.168.1.10', netmask: '255.255.255.0', cidr: '192.168.1.0/24', rdma: false },
+      { name: 'enp193s0', ip: '172.16.69.201', netmask: '255.255.255.0', cidr: '172.16.69.0/24', rdma: false },
+      { name: 'enp196s0', ip: '172.16.254.201', netmask: '255.255.255.0', cidr: '172.16.254.0/24', rdma: true },
+      { name: 'enp196s0d1', ip: '172.16.253.201', netmask: '255.255.255.0', cidr: '172.16.253.0/24', rdma: false },
+      { name: 'podman0', ip: '10.88.0.1', netmask: '255.255.0.0', cidr: '10.88.0.0/16', rdma: false },
+      { name: 'veth9f2c1a', ip: '10.88.0.7', netmask: '255.255.0.0', cidr: '10.88.0.0/16', rdma: false },
+    ],
+    rdma: [
+      { hca: 'mlx4_0', ports: [1, 2], gid_index: 3, netdev: 'enp196s0', fabric_ip: '172.16.254.201' },
+    ],
     gpus: [
       { index: 0, model: 'Tesla V100-SXM2-32GB', util: 96, mem_used: 30210, mem_total: 32768, temp: 71, power_draw: 288, power_limit: 300 },
       { index: 1, model: 'Tesla V100-SXM2-32GB', util: 92, mem_used: 29880, mem_total: 32768, temp: 68, power_draw: 271, power_limit: 300 },
@@ -1104,13 +1546,26 @@ const MOCK_NODES = [
   {
     node_id: 'ebola-c3d4', hostname: 'ebola',
     roles: ['participant'], state: 'DEGRADED', connected: true,
-    addresses: { mgmt: '192.168.1.11', fabric: ['10.10.0.2'] },
+    addresses: { mgmt: '192.168.1.11', fabric: ['172.16.254.202'] },
+    interfaces: [
+      { name: 'ens2', ip: '192.168.1.11', netmask: '255.255.255.0', cidr: '192.168.1.0/24', rdma: false },
+      { name: 'enp193s0', ip: '172.16.69.202', netmask: '255.255.255.0', cidr: '172.16.69.0/24', rdma: false },
+      { name: 'enp196s0', ip: '172.16.254.202', netmask: '255.255.255.0', cidr: '172.16.254.0/24', rdma: true },
+      { name: 'enp196s0d1', ip: '172.16.253.202', netmask: '255.255.255.0', cidr: '172.16.253.0/24', rdma: false },
+      { name: 'cni-podman0', ip: '10.88.0.1', netmask: '255.255.0.0', cidr: '10.88.0.0/16', rdma: false },
+    ],
+    rdma: [
+      { hca: 'mlx4_0', ports: [1, 2], gid_index: 3, netdev: 'enp196s0', fabric_ip: '172.16.254.202' },
+    ],
     gpus: [
       { index: 0, model: 'Tesla V100-PCIE-16GB', util: 88, mem_used: 15100, mem_total: 16384, temp: 86, power_draw: 148, power_limit: 150 },
       { index: 1, model: 'Tesla V100-PCIE-16GB', util: 0, mem_used: 4, mem_total: 16384, temp: 44, power_draw: 33, power_limit: 150 },
     ],
     replicas: [{ id: 'devstral-r0', state: 'FAILED', port: 8001 }],
-    mounts: [{ path: '/export/models', source: 'covid:/export/models', ok: false }],
+    mounts: [
+      { path: '/models', source: 'covid:/models', ok: true },
+      { path: '/export/models', source: 'covid:/export/models', ok: false },
+    ],
   },
 ];
 
@@ -1223,16 +1678,37 @@ const MOCK_CONFIG = {
     CCP_TELEMETRY_SEC: '10',
     CCP_HEARTBEAT_MISS: '3',
   },
+  // Setting catalog as the control plane publishes it. Only the `network`
+  // group is consumed by the UI today (it drives the Networks block); the
+  // rest of the tab still renders from SETTING_GROUPS.
+  settings: {
+    ray_node_ip: {
+      group: 'network', widget: 'ip', label: 'Cluster / control network',
+      help: 'Control-plane and Ray traffic; also this node’s identity in the cluster.',
+    },
+    nccl_socket_ifname: {
+      group: 'network', widget: 'nic-list', label: 'Compute (NCCL) network',
+      help: 'NCCL collectives between replicas. The local NIC is set first; the cluster appends the rest.',
+    },
+    gloo_socket_ifname: {
+      group: 'network', widget: 'nic', label: 'Compute (Gloo) NIC',
+      help: 'Gloo control collectives — a single local NIC.',
+    },
+    storage_bind_ip: {
+      group: 'network', widget: 'ip', label: 'Storage network',
+      help: 'Shares are served on this NIC. The port is chosen automatically and advertised to the cluster.',
+    },
+  },
   nodes: {
     'covid-a1b2': {
       hostname: 'covid',
       detected: {
         roles: 'admin,participant,storage',
         CLUSTER_ID: 'default',
-        RAY_NODE_IP: '10.10.0.1',
-        NCCL_SOCKET_IFNAME: 'enp196s0,ens2',
-        GLOO_SOCKET_IFNAME: 'enp196s0',
-        NCCL_IB_HCA: 'mlx5_0:1',
+        ray_node_ip: '172.16.69.201',
+        nccl_socket_ifname: 'enp196s0,ens2',
+        gloo_socket_ifname: 'enp196s0',
+        NCCL_IB_HCA: 'mlx4_0:1',
         NCCL_IB_GID_INDEX: '3',
         NCCL_P2P_DISABLE: '1',
         gpu_power_cap_w: '300',
@@ -1240,6 +1716,16 @@ const MOCK_CONFIG = {
       },
       overrides: {
         NCCL_P2P_DISABLE: '1',
+        storage_bind_ip: '172.16.254.201',
+      },
+      effective: {
+        roles: 'admin,participant,storage',
+        CLUSTER_ID: 'default',
+        ray_node_ip: '172.16.69.201',
+        nccl_socket_ifname: 'enp196s0,ens2',
+        gloo_socket_ifname: 'enp196s0',
+        storage_bind_ip: '172.16.254.201',
+        gpu_power_cap_w: '300',
       },
     },
     'ebola-c3d4': {
@@ -1247,10 +1733,10 @@ const MOCK_CONFIG = {
       detected: {
         roles: 'participant',
         CLUSTER_ID: 'default',
-        RAY_NODE_IP: '10.10.0.2',
-        RAY_HEAD_HOST: '10.10.0.1:6379',
-        NCCL_SOCKET_IFNAME: 'enp196s0,ens2',
-        GLOO_SOCKET_IFNAME: 'ens2',
+        ray_node_ip: '172.16.69.202',
+        RAY_HEAD_HOST: '172.16.69.201:6379',
+        nccl_socket_ifname: 'enp196s0,ens2',
+        gloo_socket_ifname: 'ens2',
         NCCL_IB_HCA: 'mlx4_0:1',
         NCCL_IB_GID_INDEX: '1',
         gpu_power_cap_w: '300',
@@ -1259,12 +1745,42 @@ const MOCK_CONFIG = {
       },
       // ebola needs its local NIC first + the workaround power cap.
       overrides: {
-        NCCL_SOCKET_IFNAME: 'ens2,enp196s0',
+        nccl_socket_ifname: 'enp196s0d1,enp196s0',
         gpu_power_cap_w: '150',
+      },
+      effective: {
+        roles: 'participant',
+        CLUSTER_ID: 'default',
+        ray_node_ip: '172.16.69.202',
+        RAY_HEAD_HOST: '172.16.69.201:6379',
+        nccl_socket_ifname: 'enp196s0d1,enp196s0',
+        gloo_socket_ifname: 'ens2',
+        gpu_power_cap_w: '150',
+        // storage_bind_ip deliberately unset: ebola has no storage role, so
+        // its picker demonstrates the RDMA-interface fallback.
       },
     },
   },
 };
+
+/* Live mock config state — the network pickers mutate it so ?mock=1 round-trips
+ * a change without a backend. */
+let mockConfigData = null;
+function mockConfig() {
+  if (!mockConfigData) mockConfigData = deepClone(MOCK_CONFIG);
+  return mockConfigData;
+}
+
+function mockSetOverride(nodeId, key, val) {
+  const d = mockConfig();
+  const node = d.nodes[nodeId] || (d.nodes[nodeId] = { overrides: {}, detected: {}, effective: {} });
+  node.overrides = node.overrides || {};
+  node.effective = node.effective || {};
+  if (val === '' || val == null) { delete node.overrides[key]; delete node.effective[key]; }
+  else { node.overrides[key] = val; node.effective[key] = val; }
+  configSnapshot = d;
+  configLoaded = false;                 // Configuration tab re-reads on open
+}
 
 /* =========================================================================
  * INIT

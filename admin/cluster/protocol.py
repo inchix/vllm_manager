@@ -65,6 +65,18 @@ ROLE_PARTICIPANT = "participant"
 ROLE_STORAGE = "storage"
 ALL_ROLES = {ROLE_ADMIN, ROLE_PARTICIPANT, ROLE_STORAGE}
 
+# Human-facing names. The wire ids stay stable (they live in .env files, saved
+# per-node config and join tokens); only the presentation changes.
+ROLE_LABELS = {
+    ROLE_ADMIN: "Admin",
+    ROLE_PARTICIPANT: "GPU Worker",
+    ROLE_STORAGE: "Storage",
+}
+
+
+def role_label(role: str) -> str:
+    return ROLE_LABELS.get(role, role)
+
 # Node lifecycle states (admin's view) — see docs/02.
 STATE_READY = "READY"
 STATE_SERVING = "SERVING"

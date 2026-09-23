@@ -214,6 +214,12 @@ if CONTROL_PLANE:
         def _cluster_css():
             return FileResponse(_STATIC / "cluster.css", media_type="text/css")
 
+        @app.get("/join.sh")
+        def _join_script():
+            # Public on purpose: the script carries no secret — the operator supplies
+            # the join token on the command line. See auth._PUBLIC_PATHS.
+            return FileResponse(_STATIC / "join.sh", media_type="text/x-shellscript")
+
         logger.info("Control plane ENABLED: CCP WebSocket /api/ccp, UI /cluster")
     except Exception as _cp_err:  # noqa: BLE001
         logger.error("Control plane failed to initialise (%s); continuing without it", _cp_err)

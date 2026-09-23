@@ -83,6 +83,7 @@ def verify_key(candidate: str) -> bool:
 # Paths that must work without auth regardless of mode.
 _PUBLIC_PATHS = {
     "/login",
+    "/join.sh",   # node onboarding script; carries no secret (token is supplied by the operator)
     "/api/auth/login",
     "/api/auth/status",
     "/api/auth/logout",

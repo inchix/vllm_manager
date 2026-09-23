@@ -22,11 +22,15 @@ RUN go build -trimpath -o /out/modelfsd ./cmd/modelfsd
 #   vllm/vllm-openai:latest pinned 2026-07-29 (vLLM 0.17.1, torch 2.10+cu129)
 FROM docker.io/vllm/vllm-openai@sha256:0dc46f74eb0e630675d83101dc66c6441c4475cceedcf9235ee42b87c3affd23
 
-RUN pip install --no-cache-dir nvidia-ml-py \
-    && pip install --no-cache-dir "transformers>=5.5,<6" \
-    && pip install --no-cache-dir "ray[default]>=2.9" \
-    && pip install --no-cache-dir "mistral_common>=1.11.5" \
-    && pip install --no-cache-dir "websockets>=12"
+# EXACT pins, not ranges. Every node in a cluster must run a byte-identical image:
+# a range lets two boxes built days apart resolve different Ray/transformers builds,
+# and version skew across nodes breaks distributed inference in obscure ways.
+# These are the versions of the verified-working image; bump deliberately.
+RUN pip install --no-cache-dir "nvidia-ml-py==13.590.48" \
+    && pip install --no-cache-dir "transformers==5.17.0" \
+    && pip install --no-cache-dir "ray[default]==2.54.0" \
+    && pip install --no-cache-dir "mistral_common==1.12.0" \
+    && pip install --no-cache-dir "websockets==16.0"
 # websockets: the v0.4.0 control-plane agent (admin/agent/agentd.py) dials the admin's CCP
 # WebSocket, and uvicorn needs it to serve that endpoint. Usually present via uvicorn[standard];
 # pinned here so the agent works regardless of the base image's extras.

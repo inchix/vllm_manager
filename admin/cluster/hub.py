@@ -15,7 +15,11 @@ background sweep that promotes silent nodes to DOWN.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import secrets
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
@@ -46,11 +50,84 @@ class ClusterHub:
         self._sweep_task: Optional[asyncio.Task] = None
         self._stop = False
 
+    # -- join tokens (node onboarding) ------------------------------------
+    @property
+    def _tokens_path(self) -> str:
+        return os.path.join(os.path.dirname(self.config.path) or ".", "join-tokens.json")
+
+    def _load_tokens(self) -> dict:
+        try:
+            with open(self._tokens_path, "r", encoding="utf-8") as fh:
+                return json.load(fh) or {}
+        except (FileNotFoundError, ValueError, OSError):
+            return {}
+
+    def _save_tokens(self, toks: dict) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._tokens_path) or ".", exist_ok=True)
+            with open(self._tokens_path, "w", encoding="utf-8") as fh:
+                json.dump(toks, fh, indent=2)
+        except OSError as exc:
+            log.warning("could not persist join tokens: %s", exc)
+
+    def mint_join_token(self, roles: list, ttl_minutes: int = 60,
+                        label: str = "") -> dict:
+        """A short-lived credential that lets ONE new node join. It is deliberately
+        not the admin API key — you never paste that onto a new box."""
+        roles = protocol.validate_roles(roles or [protocol.ROLE_PARTICIPANT])
+        token = "join-" + secrets.token_urlsafe(24)
+        toks = self._load_tokens()
+        toks[token] = {"roles": roles, "label": label, "created": time.time(),
+                       "expires": time.time() + ttl_minutes * 60, "node_id": None}
+        self._save_tokens(toks)
+        return {"token": token, "roles": roles, "expires_in_min": ttl_minutes}
+
+    def _join_token_record(self, key: Optional[str]) -> Optional[dict]:
+        if not key or not key.startswith("join-"):
+            return None
+        rec = self._load_tokens().get(key)
+        if not rec:
+            return None
+        # Unused tokens expire; once bound to a node it stays valid for reconnects
+        # until explicitly revoked.
+        if rec.get("node_id") is None and time.time() > rec.get("expires", 0):
+            return None
+        return rec
+
+    def bind_join_token(self, key: str, node_id: str) -> None:
+        toks = self._load_tokens()
+        rec = toks.get(key)
+        if rec and rec.get("node_id") in (None, node_id):
+            rec["node_id"] = node_id
+            self._save_tokens(toks)
+
+    def revoke_join_token(self, token: Optional[str] = None,
+                          node_id: Optional[str] = None) -> dict:
+        toks = self._load_tokens()
+        gone = [k for k, v in toks.items()
+                if (token and k == token) or (node_id and v.get("node_id") == node_id)]
+        for k in gone:
+            toks.pop(k, None)
+        self._save_tokens(toks)
+        return {"ok": bool(gone), "revoked": len(gone)}
+
+    def list_join_tokens(self) -> list:
+        out = []
+        for k, v in self._load_tokens().items():
+            out.append({"token": k[:14] + "…", "roles": v.get("roles"),
+                        "label": v.get("label", ""), "node_id": v.get("node_id"),
+                        "expires": v.get("expires"),
+                        "used": v.get("node_id") is not None})
+        return out
+
     # -- auth -------------------------------------------------------------
     def check_key(self, presented: Optional[str]) -> bool:
         if not self.auth_enabled:
             return True
-        return bool(presented) and presented == self.api_key
+        if presented and presented == self.api_key:
+            return True
+        # a valid join token authenticates the CCP connection of a joining node
+        return self._join_token_record(presented) is not None
 
     def _key_from_ws(self, ws: WebSocket) -> Optional[str]:
         auth = ws.headers.get("authorization", "")
@@ -137,9 +214,11 @@ class ClusterHub:
 
     # -- WebSocket handler ------------------------------------------------
     async def handle_ws(self, ws: WebSocket) -> None:
-        if not self.check_key(self._key_from_ws(ws)):
+        presented = self._key_from_ws(ws)
+        if not self.check_key(presented):
             await ws.close(code=4401)
             return
+        join_rec = self._join_token_record(presented)   # None when using the admin key
         await ws.accept()
         node_id: Optional[str] = None
         try:
@@ -153,6 +232,15 @@ class ClusterHub:
                 return
             node = self.registry.register(frame["body"])
             node_id = node.node_id
+            if join_rec is not None:
+                # A node onboarded with a join token takes the roles the token was
+                # minted for, and the token binds to it for future reconnects.
+                self.bind_join_token(presented, node_id)
+                override = self.config.override(node_id)
+                if not override.get("roles"):
+                    override["roles"] = join_rec.get("roles") or [protocol.ROLE_PARTICIPANT]
+                    self.config.set_override(node_id, override, node.detected)
+                log.info("node %s joined via token (roles=%s)", node_id, override.get("roles"))
             self._apply_role_override(node)   # admin-assigned roles win over the agent's .env
             self._conns[node_id] = ws
             log.info("node %s registered: roles=%s gpus=%d", node_id, node.roles, len(node.gpus))
@@ -506,6 +594,8 @@ class ClusterHub:
             "nodes_alive": len(alive),
             "gpus_total": gpus,
             "roles": {r: len([n for n in alive if r in n.roles]) for r in protocol.ALL_ROLES},
+            # display names for the UI; wire ids stay stable
+            "role_labels": protocol.ROLE_LABELS,
             "replicas": {rid: m.get("state") for rid, m in self._replicas.items()},
         }
 
@@ -560,6 +650,54 @@ def build_cluster_router(hub: ClusterHub) -> APIRouter:
             return JSONResponse(status_code=400, content={"error": "; ".join(errors)})
         await hub.push_config(list((data.get("nodes") or {}).keys()) or None)
         return hub.config.snapshot(hub.registry.detected_by_node())
+
+    @router.get("/api/cluster/image")
+    async def image_ref(request: Request):
+        # join.sh calls this with its join token to learn which image to pull, so the
+        # whole cluster runs a byte-identical build.
+        if not _auth(request):
+            return _UNAUTH
+        return {"image_ref": os.getenv("IMAGE_REF", "")}
+
+    @router.get("/api/cluster/join-tokens")
+    async def join_tokens(request: Request):
+        if not _auth(request):
+            return _UNAUTH
+        return hub.list_join_tokens()
+
+    @router.post("/api/cluster/join-token")
+    async def join_token(request: Request):
+        if not _auth(request):
+            return _UNAUTH
+        d = await request.json()
+        try:
+            tok = hub.mint_join_token(d.get("roles") or ["participant"],
+                                      int(d.get("ttl_minutes", 60)), d.get("label", ""))
+        except protocol.ProtocolError as exc:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+        # The one-liner to paste on the new box. The image ref is baked in rather than
+        # fetched back from the admin: the join token is not accepted by the app's auth
+        # middleware (only the CCP WebSocket honours it), and this saves a round trip.
+        base = str(request.base_url).rstrip("/")
+        cmd = ("curl -sfL %s/join.sh | sudo bash -s -- --token %s --admin-url %s"
+               % (base, tok["token"], base))
+        roles_arg = ",".join(tok["roles"])
+        if roles_arg and roles_arg != "participant":
+            cmd += " --roles %s" % roles_arg
+        image_ref = os.getenv("IMAGE_REF", "")
+        if image_ref:
+            cmd += " --image %s" % image_ref
+        tok["image_ref"] = image_ref
+        tok["join_command"] = cmd
+        tok["ok"] = True
+        return tok
+
+    @router.post("/api/cluster/join-token/revoke")
+    async def revoke_join_token(request: Request):
+        if not _auth(request):
+            return _UNAUTH
+        d = await request.json()
+        return hub.revoke_join_token(d.get("token"), d.get("node_id"))
 
     @router.post("/api/cluster/roles")
     async def roles(request: Request):
