@@ -339,6 +339,74 @@ def detect_rdma() -> List[Dict[str, object]]:
     return rdma
 
 
+# ---------------------------------------------------------------------------
+# Volume detection (storage role) — what this node could export
+# ---------------------------------------------------------------------------
+
+# Pseudo/virtual filesystems that are never shareable data volumes.
+_PSEUDO_FS = {
+    "proc", "sysfs", "devtmpfs", "devpts", "tmpfs", "ramfs", "cgroup", "cgroup2",
+    "overlay", "squashfs", "mqueue", "securityfs", "debugfs", "tracefs", "bpf",
+    "configfs", "fusectl", "pstore", "hugetlbfs", "autofs", "binfmt_misc", "nsfs",
+    "rpc_pipefs", "selinuxfs", "efivarfs", "fuse.portal",
+}
+
+
+# Mount prefixes that are never user data (OS, container plumbing, our own code mount).
+_SYSTEM_PREFIXES = ("/boot", "/app", "/etc", "/usr", "/run", "/dev", "/proc", "/sys",
+                    "/var/lib/containers", "/var/lib/docker", "/snap")
+
+
+def _is_system_mount(path: str) -> bool:
+    if path == "/":
+        return True
+    return any(path == p or path.startswith(p + "/") for p in _SYSTEM_PREFIXES)
+
+
+def detect_volumes() -> List[Dict[str, object]]:
+    """Data filesystems visible to this process, as share candidates.
+
+    NOTE: the agent runs inside the container, so this reports what is *mounted into*
+    the container (e.g. /models), not the host's full volume list. Bind-mount extra
+    host paths (EXTRA_VOLUMES in .env) to make them shareable.
+    """
+    import shutil
+    vols: List[Dict[str, object]] = []
+    seen = set()
+    try:
+        with open("/proc/self/mounts", "r") as fh:
+            lines = fh.read().splitlines()
+    except Exception:
+        return vols
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        mountpoint, fstype = parts[1].replace("\\040", " "), parts[2]
+        if fstype in _PSEUDO_FS or mountpoint in seen:
+            continue
+        if _is_system_mount(mountpoint):
+            continue
+        if not os.path.isdir(mountpoint):
+            continue
+        try:
+            usage = shutil.disk_usage(mountpoint)
+        except Exception:
+            continue
+        if usage.total <= 0:
+            continue
+        seen.add(mountpoint)
+        vols.append({
+            "path": mountpoint,
+            "fstype": fstype,
+            "total": int(usage.total),
+            "used": int(usage.total - usage.free),
+            "free": int(usage.free),
+        })
+    vols.sort(key=lambda v: v["path"])
+    return vols
+
+
 def _mgmt_ip_socket() -> Optional[str]:
     """The default-route source IP (no `ip` CLI). No packets are sent."""
     try:
@@ -431,6 +499,7 @@ def detect_node() -> dict:
         "iommu": iommu,
         "rdma": rdma,
         "mgmt_ip": mgmt_ip,
+        "volumes": detect_volumes(),
         "derived": derived,
     }
 

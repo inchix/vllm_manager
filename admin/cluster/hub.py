@@ -153,6 +153,7 @@ class ClusterHub:
                 return
             node = self.registry.register(frame["body"])
             node_id = node.node_id
+            self._apply_role_override(node)   # admin-assigned roles win over the agent's .env
             self._conns[node_id] = ws
             log.info("node %s registered: roles=%s gpus=%d", node_id, node.roles, len(node.gpus))
             eff = self.config.effective(node_id, node.detected)
@@ -188,7 +189,9 @@ class ClusterHub:
             self.registry.on_heartbeat(node_id, body.get("seq", -1))
         elif ftype == protocol.TELEMETRY:
             self.registry.on_telemetry(node_id, body.get("gpus", []),
-                                       body.get("replicas", []), body.get("mounts", []))
+                                       body.get("replicas", []), body.get("mounts", []),
+                                       volumes=body.get("volumes"),
+                                       shares=body.get("shares"))
         elif ftype in (protocol.RESULT, protocol.ACK):
             rid = frame.get("reply_to")
             fut = self._pending.get(rid) if rid else None
@@ -317,6 +320,166 @@ class ClusterHub:
         meta["state"] = "STOPPED"
         return {"ok": True, "replica_id": replica_id, "results": results}
 
+    # -- role management --------------------------------------------------
+    async def set_roles(self, node_id: str, roles: list) -> dict:
+        """Reassign a node's roles from the admin. The admin-assigned set wins over the
+        roles the agent reported from its own .env, and is re-applied on reconnect."""
+        node = self.registry.get(node_id)
+        if not node:
+            return {"ok": False, "error": "no such node"}
+        try:
+            roles = protocol.validate_roles(roles)
+        except protocol.ProtocolError as exc:
+            return {"ok": False, "error": str(exc)}
+
+        # Guards — refuse changes that would break the cluster.
+        if protocol.ROLE_ADMIN in node.roles and protocol.ROLE_ADMIN not in roles:
+            others = [n for n in self.registry.all()
+                      if n.node_id != node_id and protocol.ROLE_ADMIN in n.roles]
+            if not others:
+                return {"ok": False, "error": "refusing to remove the only admin role"}
+        if protocol.ROLE_PARTICIPANT in node.roles and protocol.ROLE_PARTICIPANT not in roles:
+            busy = [r for r in (node.replicas or []) if r.get("state") == "SERVING"]
+            if busy:
+                return {"ok": False,
+                        "error": "node is serving %d replica(s); stop them first" % len(busy)}
+        # Losing storage: stop any exports first so we don't strand mounts.
+        dropped_storage = (protocol.ROLE_STORAGE in node.roles
+                           and protocol.ROLE_STORAGE not in roles)
+        if dropped_storage:
+            for sh in list(node.shares or []):
+                await self.send_command(node_id, protocol.make_frame(
+                    protocol.UNSHARE_STORAGE, {"export_dir": sh.get("path")}), timeout=30)
+
+        override = self.config.override(node_id)
+        override["roles"] = roles
+        errs = self.config.set_override(node_id, override, node.detected)
+        if errs:
+            return {"ok": False, "error": "; ".join(errs)}
+        node.roles = roles                      # take effect immediately
+        await self.push_config([node_id])       # and tell the agent
+        return {"ok": True, "roles": roles}
+
+    def _apply_role_override(self, node) -> None:
+        """Admin-assigned roles win over what the agent reported (applied on register)."""
+        eff = self.config.effective(node.node_id, node.detected)
+        assigned = eff.get("roles")
+        if assigned:
+            try:
+                node.roles = protocol.validate_roles(assigned)
+            except protocol.ProtocolError:
+                pass
+
+    # -- storage shares ---------------------------------------------------
+    def _fabric_ip(self, node) -> str:
+        fabric = (node.addresses or {}).get("fabric") or []
+        return fabric[0] if fabric else (node.addresses or {}).get("mgmt", "")
+
+    def _mounted_by(self, export_path: str, source_node_id: str) -> list:
+        out = []
+        for n in self.registry.all():
+            if n.node_id == source_node_id:
+                continue
+            for m in (n.mounts or []):
+                src = m.get("source") or ""
+                if src.endswith(":" + export_path) or src == export_path:
+                    out.append({"node_id": n.node_id, "path": m.get("path"),
+                                "ok": bool(m.get("ok"))})
+        return out
+
+    def shares_catalog(self) -> dict:
+        """{shares:[...], volumes_by_node:{...}} — drives the Storage/Workers tabs."""
+        volumes_by_node, shares = {}, []
+        for n in self.registry.all():
+            live = {s.get("path"): s for s in (n.shares or [])}
+            wanted = set(self.config.effective(n.node_id, n.detected).get("storage_shares") or [])
+            vol_paths = {v.get("path") for v in (n.volumes or [])}
+            vols = []
+            for v in (n.volumes or []):
+                p = v.get("path")
+                sh = live.get(p)
+                item = dict(v)
+                item["shared"] = bool(sh) or p in wanted
+                item["endpoint"] = (sh or {}).get("endpoint")
+                vols.append(item)
+            # user-added paths that aren't whole volumes
+            for p in sorted(wanted | set(live)):
+                if p in vol_paths:
+                    continue
+                sh = live.get(p)
+                vols.append({"path": p, "fstype": "", "total": 0, "used": 0, "free": 0,
+                             "shared": True, "custom": True,
+                             "endpoint": (sh or {}).get("endpoint")})
+            volumes_by_node[n.node_id] = vols
+            for p, sh in live.items():
+                base = next((v for v in (n.volumes or []) if v.get("path") == p), {})
+                shares.append({
+                    "id": "%s:%s" % (n.node_id, p),
+                    "node_id": n.node_id, "path": p,
+                    "endpoint": sh.get("endpoint") or self._fabric_ip(n),
+                    "fstype": base.get("fstype", ""), "total": base.get("total", 0),
+                    "used": base.get("used", 0), "free": base.get("free", 0),
+                    "ok": bool(sh.get("ok", True)),
+                    "mounted_by": self._mounted_by(p, n.node_id),
+                })
+        return {"shares": shares, "volumes_by_node": volumes_by_node}
+
+    async def set_share(self, node_id: str, path: str, enabled: bool) -> dict:
+        node = self.registry.get(node_id)
+        if not node:
+            return {"ok": False, "error": "no such node"}
+        if protocol.ROLE_STORAGE not in node.roles:
+            return {"ok": False, "error": "node does not have the storage role"}
+        eff = self.config.effective(node_id, node.detected)
+        override = self.config.override(node_id)
+        current = list(override.get("storage_shares") or eff.get("storage_shares") or [])
+        if enabled and path not in current:
+            current.append(path)
+        elif not enabled and path in current:
+            current.remove(path)
+        if enabled:
+            frame = protocol.make_frame(protocol.SERVE_STORAGE, {
+                "export_dir": path, "listen": self._fabric_ip(node),
+                "allow": eff.get("storage_allow") or [],
+                "readahead": eff.get("storage_readahead"),
+                "port_base": int(eff.get("storage_port_base", 2049)),
+            })
+        else:
+            frame = protocol.make_frame(protocol.UNSHARE_STORAGE, {"export_dir": path})
+        res = await self.send_command(node_id, frame, timeout=30)
+        if not res.get("ok"):
+            return {"ok": False, "error": res.get("error") or res.get("detail") or "failed"}
+        override["storage_shares"] = current
+        errs = self.config.set_override(node_id, override, node.detected)
+        if errs:
+            return {"ok": False, "error": "; ".join(errs)}
+        return {"ok": True, "detail": res.get("detail", ""), "shares": current}
+
+    async def set_mount(self, node_id: str, share_id: str, enabled: bool,
+                        mount_path: Optional[str] = None) -> dict:
+        node = self.registry.get(node_id)
+        if not node:
+            return {"ok": False, "error": "no such node"}
+        cat = self.shares_catalog()
+        share = next((s for s in cat["shares"] if s["id"] == share_id), None)
+        if not share:
+            return {"ok": False, "error": "no such share"}
+        target = mount_path or share["path"]
+        if enabled:
+            src_node = self.registry.get(share["node_id"])
+            host = share["endpoint"].rsplit(":", 1)[0] if ":" in share["endpoint"] else share["endpoint"]
+            peff = self.config.effective(node_id, node.detected)
+            frame = protocol.make_frame(protocol.MOUNT_STORAGE, {
+                "source": {"host": host, "export": share["path"],
+                           "transport": peff.get("storage_transport", "tcp"),
+                           "port": share["endpoint"].rsplit(":", 1)[-1]},
+                "canonical_path": target, "opts": peff.get("mount_opts")})
+        else:
+            frame = protocol.make_frame(protocol.UNMOUNT_STORAGE, {"canonical_path": target})
+        res = await self.send_command(node_id, frame, timeout=60)
+        return {"ok": bool(res.get("ok")),
+                "error": res.get("error", ""), "detail": res.get("detail", "")}
+
     def summary(self) -> dict:
         nodes = self.registry.all()
         alive = [n for n in nodes if n.state not in (protocol.STATE_DOWN,
@@ -381,6 +544,37 @@ def build_cluster_router(hub: ClusterHub) -> APIRouter:
             return JSONResponse(status_code=400, content={"error": "; ".join(errors)})
         await hub.push_config(list((data.get("nodes") or {}).keys()) or None)
         return hub.config.snapshot(hub.registry.detected_by_node())
+
+    @router.post("/api/cluster/roles")
+    async def roles(request: Request):
+        if not _auth(request):
+            return _UNAUTH
+        d = await request.json()
+        res = await hub.set_roles(d["node_id"], d.get("roles") or [])
+        return JSONResponse(status_code=200 if res.get("ok") else 400, content=res)
+
+    @router.get("/api/cluster/shares")
+    async def shares(request: Request):
+        if not _auth(request):
+            return _UNAUTH
+        return hub.shares_catalog()
+
+    @router.post("/api/cluster/share")
+    async def share(request: Request):
+        if not _auth(request):
+            return _UNAUTH
+        d = await request.json()
+        res = await hub.set_share(d["node_id"], d["path"], bool(d.get("enabled", True)))
+        return JSONResponse(status_code=200 if res.get("ok") else 400, content=res)
+
+    @router.post("/api/cluster/mount")
+    async def mount(request: Request):
+        if not _auth(request):
+            return _UNAUTH
+        d = await request.json()
+        res = await hub.set_mount(d["node_id"], d["share_id"], bool(d.get("enabled", True)),
+                                  d.get("mount_path"))
+        return JSONResponse(status_code=200 if res.get("ok") else 400, content=res)
 
     @router.post("/api/cluster/plan")
     async def plan(request: Request):

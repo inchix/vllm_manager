@@ -51,6 +51,8 @@ SETTINGS: dict = {
     "port_end": {"scope": "cluster", "type": "int", "help": "vLLM port range end"},
     "cache_dir": {"scope": "cluster", "type": "str", "help": "compile cache dir (in-container)"},
     # storage
+    "storage_shares": {"scope": "node", "type": "paths",
+                       "help": "directories this node exports read-only (user-selectable)"},
     "storage_export_dir": {"scope": "node", "type": "str", "help": "modelfsd export dir"},
     "storage_listen": {"scope": "node", "type": "str", "help": "modelfsd fabric ip:port"},
     "storage_allow": {"scope": "node", "type": "csv", "help": "client CIDRs"},
@@ -155,6 +157,13 @@ def validate_override(override: dict, detected: Optional[dict] = None) -> list:
                 elif detected_ifaces and val not in detected_ifaces:
                     errs.append(f"{key}: '{val}' not in detected NICs {sorted(detected_ifaces)} "
                                 f"(pin explicitly if intentional)")
+            elif t == "paths":
+                if not isinstance(val, (list, tuple)):
+                    errs.append(f"{key}: must be a list of absolute paths")
+                else:
+                    bad = [p for p in val if not isinstance(p, str) or not p.startswith("/")]
+                    if bad:
+                        errs.append(f"{key}: not absolute path(s): {bad}")
             elif t == "float":
                 f = float(val)
                 if key == "gpu_memory_utilization" and not (0.0 < f <= 1.0):

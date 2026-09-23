@@ -217,6 +217,16 @@ fi
 # so the same files must exist at the same path on each box.
 RUN_ARGS+=(-v "$MODELS_DIR:/models${VOL_SUFFIX}")
 
+# Additional host volumes to expose to the container. The storage role can only
+# share what it can see, so anything you want shareable must be mounted in here.
+# Space-separated host:container pairs, e.g.
+#   EXTRA_VOLUMES=/data/scratch:/scratch /mnt/big:/big
+if [ -n "${EXTRA_VOLUMES:-}" ]; then
+  for _extra_vol in $EXTRA_VOLUMES; do
+    RUN_ARGS+=(-v "${_extra_vol}${VOL_SUFFIX}")
+  done
+fi
+
 # Dev iteration: bind-mount the host admin/ over the image's copy so Python/UI
 # changes apply on restart (Python) or refresh (static) WITHOUT a rebuild.
 # Off by default; set DEV_ADMIN_MOUNT=1 in .env while iterating.

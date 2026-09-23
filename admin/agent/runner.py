@@ -32,7 +32,7 @@ def _run(cmd: list, timeout: int = 60) -> tuple:
 class Runner:
     def __init__(self):
         self._replicas: dict = {}     # replica_id -> {procs: [Popen], role, port, state}
-        self._storage: Optional[subprocess.Popen] = None
+        self._shares: dict = {}       # export path -> {proc, endpoint, port}
         self._mounts: dict = {}       # path -> {source, ok}
 
     # -- GPU telemetry ----------------------------------------------------
@@ -167,30 +167,85 @@ class Runner:
         self._mounts.pop(path, None)
         return {"ok": rc == 0, "error": "" if rc == 0 else err.strip()}
 
+    def volumes(self) -> list:
+        """Share candidates visible to this node (live free space)."""
+        try:
+            from ..cluster.detect import detect_volumes
+            return detect_volumes()
+        except Exception:
+            return []
+
+    def share_states(self) -> list:
+        """Currently exported shares: [{path, endpoint, ok}]."""
+        out = []
+        for path, s in self._shares.items():
+            alive = s["proc"].poll() is None
+            out.append({"path": path, "endpoint": s["endpoint"], "ok": alive})
+        return out
+
+    def _next_share_port(self, base: int = 2049) -> int:
+        used = {s["port"] for s in self._shares.values()}
+        p = base
+        while p in used:
+            p += 1
+        return p
+
     def serve_storage(self, body: dict) -> dict:
-        """Start modelfsd serving a local dir read-only over the fabric."""
+        """Export one local directory read-only via modelfsd. Multiple shares per node
+        are supported — one modelfsd process per share, each on its own port."""
         binary = os.environ.get("MODELFSD_BIN", "modelfsd")
         export = body.get("export_dir")
-        listen = body.get("listen")
+        if not export:
+            return {"ok": False, "error": "export_dir required"}
+        # validate: user-selectable paths must actually exist here
+        if not os.path.isdir(export):
+            return {"ok": False, "error": f"no such directory on this node: {export}"}
+
+        existing = self._shares.get(export)
+        if existing and existing["proc"].poll() is None:
+            return {"ok": True, "detail": "already shared", "endpoint": existing["endpoint"]}
+
+        listen = body.get("listen") or ""
+        if ":" in listen:
+            bind_ip, port_s = listen.rsplit(":", 1)
+            try:
+                port = int(port_s)
+            except ValueError:
+                port = self._next_share_port()
+        else:
+            bind_ip = listen or "0.0.0.0"
+            port = self._next_share_port(int(body.get("port_base", 2049)))
+        endpoint = "%s:%d" % (bind_ip, port)
+
+        cmd = [binary, "--export", export, "--listen", endpoint]
         allow = body.get("allow") or []
-        if not export or not listen:
-            return {"ok": False, "error": "export_dir and listen required"}
-        if self._storage and self._storage.poll() is None:
-            return {"ok": True, "detail": "modelfsd already running"}
-        cmd = [binary, "--export", export, "--listen", listen]
         if allow:
             cmd += ["--allow", ",".join(allow)]
-        ra = body.get("readahead")
-        if ra:
-            cmd += ["--readahead", ra]
+        if body.get("readahead"):
+            cmd += ["--readahead", body["readahead"]]
         try:
-            self._storage = subprocess.Popen(cmd)
+            proc = subprocess.Popen(cmd)
         except FileNotFoundError:
             return {"ok": False, "error": f"{binary} not found (build storage/modelfsd)"}
-        time.sleep(0.5)
-        if self._storage.poll() is not None:
-            return {"ok": False, "error": "modelfsd exited immediately"}
-        return {"ok": True, "detail": f"serving {export} on {listen}"}
+        time.sleep(0.6)
+        if proc.poll() is not None:
+            return {"ok": False, "error": "modelfsd exited immediately (check path/port/allow)"}
+        self._shares[export] = {"proc": proc, "endpoint": endpoint, "port": port}
+        return {"ok": True, "detail": "serving %s on %s" % (export, endpoint),
+                "endpoint": endpoint}
+
+    def unshare_storage(self, body: dict) -> dict:
+        """Stop exporting one directory."""
+        export = body.get("export_dir")
+        s = self._shares.pop(export, None)
+        if not s:
+            return {"ok": True, "detail": "not shared"}
+        if s["proc"].poll() is None:
+            s["proc"].terminate()
+            time.sleep(1)
+            if s["proc"].poll() is None:
+                s["proc"].kill()
+        return {"ok": True, "detail": "stopped sharing %s" % export}
 
     # -- model sync -------------------------------------------------------
     def sync_model(self, body: dict) -> dict:
@@ -303,5 +358,5 @@ class Runner:
     def shutdown(self):
         for rid in list(self._replicas):
             self.stop_replica(rid, ray=True)
-        if self._storage and self._storage.poll() is None:
-            self._storage.terminate()
+        for path in list(self._shares):
+            self.unshare_storage({"export_dir": path})

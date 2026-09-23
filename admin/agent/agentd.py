@@ -180,7 +180,9 @@ class Agent:
         while True:
             frame = protocol.telemetry(self.runner.gpu_telemetry(),
                                        self.runner.replica_states(),
-                                       self.runner.mount_states())
+                                       self.runner.mount_states(),
+                                       volumes=self.runner.volumes(),
+                                       shares=self.runner.share_states())
             await ws.send(protocol.encode(frame))
             await asyncio.sleep(self._tel_sec)
 
@@ -222,6 +224,8 @@ class Agent:
             return r.unmount_storage(body["canonical_path"])
         if ftype == protocol.SERVE_STORAGE:
             return r.serve_storage(body)
+        if ftype == protocol.UNSHARE_STORAGE:
+            return r.unshare_storage(body)
         if ftype == protocol.SYNC_MODEL:
             return r.sync_model(body)
         if ftype == protocol.SET_CONFIG:
