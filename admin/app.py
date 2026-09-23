@@ -214,6 +214,14 @@ if CONTROL_PLANE:
         def _cluster_css():
             return FileResponse(_STATIC / "cluster.css", media_type="text/css")
 
+        @app.get("/serving.js")
+        def _serving_js():
+            return FileResponse(_STATIC / "serving.js", media_type="application/javascript")
+
+        @app.get("/serving.css")
+        def _serving_css():
+            return FileResponse(_STATIC / "serving.css", media_type="text/css")
+
         @app.get("/join.sh")
         def _join_script():
             # Public on purpose: the script carries no secret — the operator supplies

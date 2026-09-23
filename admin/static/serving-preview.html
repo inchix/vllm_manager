@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vLLM Cluster — Serving (preview)</title>
+<!-- Palette + shared component classes come from cluster.css, exactly as they
+     will when this panel is folded into cluster.html. serving.css only adds
+     `.sv-` prefixed rules. -->
+<link rel="stylesheet" href="cluster.css">
+<link rel="stylesheet" href="serving.css">
+</head>
+<body>
+
+<!-- =========================================================================
+     STANDALONE REVIEW HARNESS for admin/static/serving.js
+
+     Open this file directly (file:// is fine, no backend needed): it sets
+     window.SERVING_MOCK = true, so serving.js renders its built-in sample
+     cluster — covid 2x Tesla V100-32GB + ebola 2x Tesla V100-16GB, two
+     models, one replica already serving. Tick GPUs, watch TP/PP update, hit
+     Preview to see a real-shaped plan, Launch/Stop/Delete/Download all work
+     against the sample data.
+
+     Try:
+       • tick covid GPU 0+1 and ebola GPU 0+1  -> TP 2 x PP 2 = world 4,
+         preview shows the memory-weighted pp_layer_partition (27,13)
+       • tick covid GPU 0+1 and ebola GPU 0    -> the uneven-selection warning,
+         Preview/Launch disabled
+       • tick covid GPU 0+1 only               -> TP 2 x PP 1, executor mp
+
+     Append ?live=1 to point the same page at a real backend instead.
+     ====================================================================== -->
+
+<div class="page-header">
+  <h1>vLLM Multi-GPU &mdash; Serving
+    <span class="badge role-badge" id="mock-badge" style="vertical-align:middle">mock data</span>
+  </h1>
+  <div class="header-actions">
+    <button class="theme-toggle" id="theme-toggle">Light Mode</button>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <div class="banner banner-empty">
+    Standalone preview of the <strong>Serving</strong> tab. The tab bar below is inert &mdash; only
+    <strong>Serving</strong> is rendered here; the parent session wires this panel into
+    <code>cluster.html</code>&rsquo;s real tab bar.
+  </div>
+
+  <!-- Inert copy of the real tab bar, for context only. -->
+  <div class="tabs">
+    <button class="tab-btn" disabled>Summary</button>
+    <button class="tab-btn" disabled>Workers</button>
+    <button class="tab-btn" disabled>Storage</button>
+    <button class="tab-btn active">Serving</button>
+    <button class="tab-btn" disabled>Configuration</button>
+  </div>
+
+  <section class="tab-panel active" id="panel-serving">
+    <!-- serving.js auto-wires itself to #serving-content (or call
+         initServing(el) explicitly — it is idempotent). -->
+    <div id="serving-content">
+      <div class="banner banner-empty">Loading serving panel&hellip;</div>
+    </div>
+  </section>
+
+</div>
+
+<div class="toast-container" id="toast-container"></div>
+
+<script>
+  // Mock unless ?live=1 — serving.js reads window.SERVING_MOCK (and ?mock=1).
+  window.SERVING_MOCK = !new URLSearchParams(location.search).has('live');
+  if (!window.SERVING_MOCK) {
+    var b = document.getElementById('mock-badge');
+    if (b) b.style.display = 'none';
+  }
+
+  // Minimal theme toggle so the panel can be reviewed in both palettes
+  // (cluster.js, which owns this on the real page, is not loaded here).
+  (function () {
+    var btn = document.getElementById('theme-toggle');
+    function apply(light) {
+      document.body.classList.toggle('light-theme', light);
+      btn.textContent = light ? 'Dark Mode' : 'Light Mode';
+    }
+    try { apply(localStorage.getItem('theme') === 'light'); } catch (e) { apply(false); }
+    btn.addEventListener('click', function () {
+      var light = !document.body.classList.contains('light-theme');
+      apply(light);
+      try { localStorage.setItem('theme', light ? 'light' : 'dark'); } catch (e) {}
+    });
+  })();
+</script>
+<script src="serving.js"></script>
+</body>
+</html>

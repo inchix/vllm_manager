@@ -667,14 +667,17 @@
     var sel = el('sv-model');
     if (!sel) return;
     var want = state.models.slice();
+    if (!want.length) {
+      var placeholder = state.modelsStatus === 'loading' ? 'loading…'
+        : (state.modelsStatus === 'ok' ? 'no models available' : 'model list unavailable');
+      if (sel.options.length !== 1 || sel.options[0].textContent !== placeholder) {
+        sel.innerHTML = '<option value="">' + esc(placeholder) + '</option>';
+      }
+      return;
+    }
     var have = Array.prototype.map.call(sel.options, function (o) { return o.value; }).filter(Boolean);
     if (have.length === want.length && have.every(function (v, i) { return v === want[i]; })) return;
     var current = sel.value;
-    if (!want.length) {
-      sel.innerHTML = '<option value="">' +
-        (state.modelsStatus === 'ok' ? 'no models available' : 'model list unavailable') + '</option>';
-      return;
-    }
     sel.innerHTML = want.map(function (m) {
       return '<option value="' + esc(m) + '"' + (m === current ? ' selected' : '') + '>' + esc(m) + '</option>';
     }).join('');
@@ -1137,9 +1140,20 @@
     }
   }
 
+  /* Any change to the selection or the launch form invalidates the preview —
+   * a plan on screen must always describe what the form currently says. */
+  function invalidatePlan(t) {
+    if (!state.plan && !state.planError) return;
+    if (t.dataset.act === 'pick' || t.dataset.act === 'pick-node' || (t.closest && t.closest('.sv-form'))) {
+      state.plan = null; state.planError = '';
+      renderPlan();
+    }
+  }
+
   function onChange(ev) {
     var t = ev.target;
     if (!t || !t.dataset) return;
+    invalidatePlan(t);
     if (t.dataset.act === 'pick') {
       if (t.checked) state.selected.add(t.dataset.key);
       else state.selected.delete(t.dataset.key);
@@ -1157,8 +1171,7 @@
       }
       renderLayout();
     } else if (t.id === 'sv-model') {
-      state.plan = null; state.planError = '';
-      renderLayout(); renderPlan();
+      renderLayout();            // Launch is gated on a model being chosen
     }
   }
 
